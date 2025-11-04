@@ -1,6 +1,6 @@
 # Shadcn-UI Template Usage Instructions
 
-## technology stack
+## Technology stack
 
 This project is built with:
 
@@ -54,6 +54,7 @@ pnpm i
 
 ```shell
 pnpm add some_new_dependency
+```
 
 **Start Preview**
 
