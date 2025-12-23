@@ -17,6 +17,28 @@
   --gh-success-fg: #3fb950;
   --gh-danger-fg: #f85149;
   --gh-attention-fg: #d29922;
+
+  /* Tailwind/shadcn CSS Variables */
+  --background: 220 13% 5%;
+  --foreground: 210 20% 94%;
+  --card: 220 13% 9%;
+  --card-foreground: 210 20% 94%;
+  --popover: 220 13% 9%;
+  --popover-foreground: 210 20% 94%;
+  --primary: 212 92% 45%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 215 14% 16%;
+  --secondary-foreground: 210 20% 94%;
+  --muted: 215 14% 16%;
+  --muted-foreground: 215 14% 55%;
+  --accent: 215 14% 16%;
+  --accent-foreground: 210 20% 94%;
+  --destructive: 0 72% 63%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 215 14% 25%;
+  --input: 215 14% 25%;
+  --ring: 212 92% 45%;
+  --radius: 0.5rem;
 }
 
 @layer base {
