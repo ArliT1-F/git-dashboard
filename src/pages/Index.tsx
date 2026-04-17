@@ -16,30 +16,52 @@ export default function Index() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const getErrorMessage = async (response: Response, fallback: string) => {
+    try {
+      const data: unknown = await response.json()
+      if (
+        typeof data === 'object' &&
+        data !== null &&
+        'message' in data &&
+        typeof data.message === 'string'
+      ) {
+        return data.message
+      }
+    } catch {
+      // Ignore JSON parse errors and return fallback message.
+    }
+    return fallback
+  }
+
   const fetchGitHubData = async () => {
-    if (!username.trim()) return
+    const normalizedUsername = username.trim()
+    if (!normalizedUsername) return
 
     setLoading(true)
     setError(null)
 
     try {
       const [userRes, reposRes, eventsRes] = await Promise.all([
-        fetch(`https://api.github.com/users/${username}`),
-        fetch(`https://api.github.com/users/${username}/repos?sort=updated&per_page=10`),
-        fetch(`https://api.github.com/users/${username}/events?per_page=20`),
+        fetch(`https://api.github.com/users/${encodeURIComponent(normalizedUsername)}`),
+        fetch(`https://api.github.com/users/${encodeURIComponent(normalizedUsername)}/repos?sort=updated&per_page=10`),
+        fetch(`https://api.github.com/users/${encodeURIComponent(normalizedUsername)}/events?per_page=20`),
       ])
 
       if (!userRes.ok) {
-        throw new Error('User not found')
+        throw new Error(await getErrorMessage(userRes, 'User not found'))
       }
 
-      const userData = await userRes.json()
-      const reposData = await reposRes.json()
-      const eventsData = await eventsRes.json()
+      const userData: GitHubUser = await userRes.json()
+      const reposData: unknown = reposRes.ok ? await reposRes.json() : []
+      const eventsData: unknown = eventsRes.ok ? await eventsRes.json() : []
 
       setUser(userData)
-      setRepos(reposData)
-      setEvents(eventsData)
+      setRepos(Array.isArray(reposData) ? reposData : [])
+      setEvents(Array.isArray(eventsData) ? eventsData : [])
+
+      if (!reposRes.ok || !eventsRes.ok) {
+        setError('Loaded profile, but some activity data is currently unavailable.')
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch data')
       setUser(null)

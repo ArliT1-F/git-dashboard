@@ -40,7 +40,7 @@ export default function ContributionActivity({ events }: ContributionActivityPro
   };
 
   const getEventDescription = (event: GitHubEvent) => {
-    const repoName = event.repo.name.split('/')[1];
+    const repoName = event.repo?.name?.split('/')?.[1] || event.repo?.name || 'unknown repository';
     
     switch (event.type) {
       case 'PushEvent': {
@@ -48,15 +48,15 @@ export default function ContributionActivity({ events }: ContributionActivityPro
         return `Pushed ${commitCount} commit${commitCount !== 1 ? 's' : ''} to ${repoName}`;
       }
       case 'PullRequestEvent':
-        return `${event.payload.action} a pull request in ${repoName}`;
+        return `${event.payload.action || 'Updated'} a pull request in ${repoName}`;
       case 'WatchEvent':
         return `Starred ${repoName}`;
       case 'ForkEvent':
         return `Forked ${repoName}`;
       case 'CreateEvent':
-        return `Created ${event.payload.ref_type} in ${repoName}`;
+        return `Created ${event.payload.ref_type || 'resource'} in ${repoName}`;
       case 'IssuesEvent':
-        return `${event.payload.action} an issue in ${repoName}`;
+        return `${event.payload.action || 'Updated'} an issue in ${repoName}`;
       default:
         return `Activity in ${repoName}`;
     }
