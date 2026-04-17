@@ -92,6 +92,13 @@ export interface GitHubContributionYearSummary {
   monthlyTotals: GitHubContributionMonthTotal[]
 }
 
+export interface GitHubPaginationInfo {
+  limit: number
+  fetched: number
+  hasMore: boolean
+  maxLimit: number
+}
+
 export interface GitHubDashboardPayload {
   user: GitHubUser
   repos: GitHubRepository[]
@@ -101,6 +108,10 @@ export interface GitHubDashboardPayload {
     remaining: number | null
     resetAt: string | null
     limited: boolean
+  }
+  pagination?: {
+    repos: GitHubPaginationInfo
+    events: GitHubPaginationInfo
   }
   profileReadme: GitHubProfileReadme
   locationInsight: GitHubLocationInsight

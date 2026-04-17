@@ -1,6 +1,14 @@
 const GITHUB_API_BASE_URL = 'https://api.github.com'
-const REQUEST_TIMEOUT_MS = 10_000
+const REQUEST_TIMEOUT_MS = 15_000
 const CACHE_CONTROL_HEADER = 's-maxage=60, stale-while-revalidate=300'
+
+const GITHUB_MAX_PER_PAGE = 100
+const DEFAULT_REPOS_LIMIT = 30
+const MAX_REPOS_LIMIT = 500
+const DEFAULT_EVENTS_LIMIT = 30
+// GitHub caps the events feed at 300 total items across 10 pages of 30.
+const MAX_EVENTS_LIMIT = 300
+const EVENTS_PER_PAGE = 30
 
 export const config = {
   runtime: 'edge',
@@ -17,15 +25,6 @@ type GitHubContributionDay = {
 
 type GitHubContributionWeek = {
   contributionDays: GitHubContributionDay[]
-}
-
-type GitHubContributionYear = {
-  year: number
-  totalContributions: number
-  contributionMonths: {
-    month: string
-    totalContributions: number
-  }[]
 }
 
 type GitHubContributionsCollection = {
@@ -49,17 +48,23 @@ type GitHubUserContributionsResponse = {
   errors?: { message?: string }[]
 }
 
-type GitHubReadmeContentResponse = {
-  content?: string
-  encoding?: string
+type GitHubReadmeMetadata = {
   html_url?: string
 }
 
 type RateLimitInfo = {
   remaining: number | null
   resetAt: string | null
+  resetAtMs: number | null
   limited: boolean
 }
+
+const emptyRateLimit = (): RateLimitInfo => ({
+  remaining: null,
+  resetAt: null,
+  resetAtMs: null,
+  limited: false,
+})
 
 const jsonResponse = (
   body: unknown,
@@ -81,15 +86,42 @@ const parseRateLimitInfo = (response: Response): RateLimitInfo => {
     typeof remainingRaw === 'string' ? Number.parseInt(remainingRaw, 10) : Number.NaN
   const parsedReset = typeof resetRaw === 'string' ? Number.parseInt(resetRaw, 10) : Number.NaN
 
+  const remaining = Number.isNaN(parsedRemaining) ? null : parsedRemaining
+  const resetMs = Number.isNaN(parsedReset) ? null : parsedReset * 1000
+
   return {
-    remaining: Number.isNaN(parsedRemaining) ? null : parsedRemaining,
-    resetAt: Number.isNaN(parsedReset) ? null : new Date(parsedReset * 1000).toISOString(),
-    limited: !Number.isNaN(parsedRemaining) && parsedRemaining <= 0,
+    remaining,
+    resetAt: resetMs === null ? null : new Date(resetMs).toISOString(),
+    resetAtMs: resetMs,
+    limited: remaining !== null && remaining <= 0,
   }
 }
 
+const mergeRateLimits = (limits: RateLimitInfo[]): RateLimitInfo => {
+  const remainings = limits
+    .map((limit) => limit.remaining)
+    .filter((value): value is number => typeof value === 'number')
+  const resetMsValues = limits
+    .map((limit) => limit.resetAtMs)
+    .filter((value): value is number => typeof value === 'number')
+
+  const remaining = remainings.length > 0 ? Math.min(...remainings) : null
+  // When we're rate-limited we want the soonest reset; otherwise the latest is fine for display.
+  const resetMs = resetMsValues.length > 0 ? Math.min(...resetMsValues) : null
+
+  return {
+    remaining,
+    resetAt: resetMs === null ? null : new Date(resetMs).toISOString(),
+    resetAtMs: resetMs,
+    limited: remaining !== null && remaining <= 0,
+  }
+}
+
+// GitHub returns 403 for primary rate limits and 429 for secondary/abuse limits.
 const isRateLimitedResponse = (response: Response, rateLimit: RateLimitInfo) =>
-  response.status === 403 && rateLimit.limited
+  (response.status === 403 && rateLimit.limited) ||
+  response.status === 429 ||
+  (response.status === 403 && response.headers.has('retry-after'))
 
 const parseGitHubErrorMessage = async (response: Response, fallback: string) => {
   try {
@@ -104,10 +136,15 @@ const parseGitHubErrorMessage = async (response: Response, fallback: string) => 
   return fallback
 }
 
-const githubRequest = async (path: string, signal: AbortSignal) => {
+const githubRequest = async (
+  path: string,
+  signal: AbortSignal,
+  accept = 'application/vnd.github+json'
+) => {
   const headers = new Headers({
-    Accept: 'application/vnd.github+json',
+    Accept: accept,
     'User-Agent': 'git-dashboard-vercel-proxy',
+    'X-GitHub-Api-Version': '2022-11-28',
   })
 
   if (process.env.GITHUB_TOKEN) {
@@ -118,6 +155,77 @@ const githubRequest = async (path: string, signal: AbortSignal) => {
     headers,
     signal,
   })
+}
+
+const parseIntParam = (raw: string | null, fallback: number, min: number, max: number) => {
+  if (!raw) return fallback
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(Math.max(parsed, min), max)
+}
+
+type PaginatedFetchResult<T> = {
+  items: T[]
+  rateLimits: RateLimitInfo[]
+  warning: string | null
+  truncated: boolean
+  totalFetched: number
+}
+
+const fetchPaginated = async <T>(
+  buildPath: (page: number, perPage: number) => string,
+  endpointLabel: string,
+  signal: AbortSignal,
+  limit: number,
+  perPageCap: number
+): Promise<PaginatedFetchResult<T>> => {
+  const items: T[] = []
+  const rateLimits: RateLimitInfo[] = []
+  let warning: string | null = null
+  let truncated = false
+
+  const effectiveLimit = Math.max(limit, 0)
+  const perPage = Math.min(perPageCap, GITHUB_MAX_PER_PAGE)
+  const maxPages = Math.max(1, Math.ceil(effectiveLimit / perPage))
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const response = await githubRequest(buildPath(page, perPage), signal)
+    const rateLimit = parseRateLimitInfo(response)
+    rateLimits.push(rateLimit)
+
+    if (!response.ok) {
+      warning = await buildEndpointWarning(endpointLabel, response, rateLimit)
+      break
+    }
+
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      warning = `Loaded profile, but ${endpointLabel} returned an unexpected response.`
+      break
+    }
+
+    if (!Array.isArray(payload)) break
+
+    const pageItems = payload as T[]
+    const remainingSlots = effectiveLimit - items.length
+    if (remainingSlots <= 0) {
+      if (pageItems.length > 0) truncated = true
+      break
+    }
+
+    if (pageItems.length > remainingSlots) {
+      items.push(...pageItems.slice(0, remainingSlots))
+      truncated = true
+      break
+    }
+
+    items.push(...pageItems)
+    if (pageItems.length < perPage) break
+  }
+
+  return { items, rateLimits, warning, truncated, totalFetched: items.length }
 }
 
 const buildEndpointWarning = async (
@@ -198,18 +306,6 @@ const calculateLongestStreak = (days: { date: string; count: number }[]) => {
   }
 
   return longestStreak
-}
-
-const decodeBase64Utf8 = (base64Content: string) => {
-  try {
-    return decodeURIComponent(
-      Array.from(atob(base64Content))
-        .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, '0')}`)
-        .join('')
-    )
-  } catch {
-    return atob(base64Content)
-  }
 }
 
 const buildAchievements = (user: {
@@ -327,6 +423,19 @@ export default async function handler(request: Request) {
   const selectedYearParam = requestUrl.searchParams.get('year')
   const selectedYear = selectedYearParam ? Number.parseInt(selectedYearParam, 10) : null
 
+  const reposLimit = parseIntParam(
+    requestUrl.searchParams.get('reposLimit'),
+    DEFAULT_REPOS_LIMIT,
+    1,
+    MAX_REPOS_LIMIT
+  )
+  const eventsLimit = parseIntParam(
+    requestUrl.searchParams.get('eventsLimit'),
+    DEFAULT_EVENTS_LIMIT,
+    1,
+    MAX_EVENTS_LIMIT
+  )
+
   if (!username) {
     return jsonResponse(
       {
@@ -384,27 +493,45 @@ export default async function handler(request: Request) {
       timezone: inferredTimezone,
     }
 
-    const [reposResponse, eventsResponse, profileReadmeResponse, contributionsCollection] = await Promise.all([
-      githubRequest(`/users/${encodedUsername}/repos?sort=updated&per_page=10`, timeoutController.signal),
-      githubRequest(`/users/${encodedUsername}/events?per_page=20`, timeoutController.signal),
-      githubRequest(`/repos/${encodedUsername}/${encodedUsername}/readme`, timeoutController.signal),
-      queryContributions(username, timeoutController.signal),
-    ])
+    const [reposResult, eventsResult, profileReadmeResponse, profileReadmeMetaResponse, contributionsCollection] =
+      await Promise.all([
+        fetchPaginated<Record<string, unknown>>(
+          (page, perPage) =>
+            `/users/${encodedUsername}/repos?sort=updated&per_page=${perPage}&page=${page}`,
+          'repositories',
+          timeoutController.signal,
+          reposLimit,
+          GITHUB_MAX_PER_PAGE
+        ),
+        fetchPaginated<Record<string, unknown>>(
+          (page, perPage) =>
+            `/users/${encodedUsername}/events/public?per_page=${perPage}&page=${page}`,
+          'activity events',
+          timeoutController.signal,
+          eventsLimit,
+          EVENTS_PER_PAGE
+        ),
+        githubRequest(
+          `/repos/${encodedUsername}/${encodedUsername}/readme`,
+          timeoutController.signal,
+          'application/vnd.github.html'
+        ),
+        githubRequest(
+          `/repos/${encodedUsername}/${encodedUsername}/readme`,
+          timeoutController.signal
+        ),
+        queryContributions(username, timeoutController.signal),
+      ])
 
-    const reposRateLimit = parseRateLimitInfo(reposResponse)
-    const eventsRateLimit = parseRateLimitInfo(eventsResponse)
-    const readmeRateLimit = parseRateLimitInfo(profileReadmeResponse)
     const warnings: string[] = []
 
-    const reposPayload: unknown = reposResponse.ok ? await reposResponse.json() : []
-    if (!reposResponse.ok) {
-      warnings.push(await buildEndpointWarning('repositories', reposResponse, reposRateLimit))
-    }
+    const reposRateLimit = mergeRateLimits(reposResult.rateLimits)
+    if (reposResult.warning) warnings.push(reposResult.warning)
 
-    const eventsPayload: unknown = eventsResponse.ok ? await eventsResponse.json() : []
-    if (!eventsResponse.ok) {
-      warnings.push(await buildEndpointWarning('activity events', eventsResponse, eventsRateLimit))
-    }
+    const eventsRateLimit = mergeRateLimits(eventsResult.rateLimits)
+    if (eventsResult.warning) warnings.push(eventsResult.warning)
+
+    const readmeRateLimit = parseRateLimitInfo(profileReadmeResponse)
 
     let profileReadme = {
       exists: false,
@@ -414,14 +541,24 @@ export default async function handler(request: Request) {
     }
 
     if (profileReadmeResponse.ok) {
-      const readmePayload = (await profileReadmeResponse.json()) as GitHubReadmeContentResponse
-      if (readmePayload.content && readmePayload.encoding === 'base64') {
-        profileReadme = {
-          exists: true,
-          contentHtml: decodeBase64Utf8(readmePayload.content.replace(/\n/g, '')),
-          sourceUrl: readmePayload.html_url || `https://github.com/${username}/${username}#readme`,
-          updatedAt: null,
+      const renderedHtml = await profileReadmeResponse.text()
+      let sourceUrl: string | null = `https://github.com/${username}/${username}#readme`
+      if (profileReadmeMetaResponse.ok) {
+        try {
+          const meta = (await profileReadmeMetaResponse.json()) as GitHubReadmeMetadata
+          if (typeof meta.html_url === 'string' && meta.html_url.length > 0) {
+            sourceUrl = meta.html_url
+          }
+        } catch {
+          // Ignore metadata parse errors; keep fallback URL.
         }
+      }
+
+      profileReadme = {
+        exists: renderedHtml.trim().length > 0,
+        contentHtml: renderedHtml,
+        sourceUrl,
+        updatedAt: null,
       }
     } else if (profileReadmeResponse.status !== 404) {
       warnings.push(await buildEndpointWarning('profile README', profileReadmeResponse, readmeRateLimit))
@@ -506,15 +643,13 @@ export default async function handler(request: Request) {
       ? contributionYears.filter((item) => item.year === selectedYear)
       : contributionYears
 
-    const remainingCandidates = [
-      userRateLimit.remaining,
-      reposRateLimit.remaining,
-      eventsRateLimit.remaining,
-      readmeRateLimit.remaining,
-    ].filter((value): value is number => typeof value === 'number')
-
-    const remaining = remainingCandidates.length > 0 ? Math.min(...remainingCandidates) : null
-    const resetAt = userRateLimit.resetAt || reposRateLimit.resetAt || eventsRateLimit.resetAt
+    const aggregatedRateLimit = mergeRateLimits([
+      userRateLimit,
+      reposRateLimit,
+      eventsRateLimit,
+      readmeRateLimit,
+    ])
+    const { remaining, resetAt } = aggregatedRateLimit
 
     if (typeof remaining === 'number' && remaining > 0 && remaining <= 3) {
       warnings.push(`GitHub API rate limit is low (${remaining} requests remaining).`)
@@ -538,18 +673,32 @@ export default async function handler(request: Request) {
 
     return jsonResponse({
       user,
-      repos: Array.isArray(reposPayload) ? reposPayload : [],
-      events: Array.isArray(eventsPayload) ? eventsPayload : [],
+      repos: reposResult.items,
+      events: eventsResult.items,
       profileReadme,
       locationInsight,
       achievements,
       contributions: filteredContributionYears,
       availableContributionYears: contributionYears.map((item) => item.year),
       warnings,
+      pagination: {
+        repos: {
+          limit: reposLimit,
+          fetched: reposResult.totalFetched,
+          hasMore: reposResult.truncated,
+          maxLimit: MAX_REPOS_LIMIT,
+        },
+        events: {
+          limit: eventsLimit,
+          fetched: eventsResult.totalFetched,
+          hasMore: eventsResult.truncated,
+          maxLimit: MAX_EVENTS_LIMIT,
+        },
+      },
       rateLimit: {
         remaining,
         resetAt,
-        limited: remaining === 0,
+        limited: remaining !== null && remaining <= 0,
       },
     })
   } catch (error) {

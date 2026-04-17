@@ -1,13 +1,26 @@
 import { GitHubRepository } from '@/types/github';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Star, GitFork, Circle, ExternalLink } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Star, GitFork, Circle, ExternalLink, Loader2 } from 'lucide-react';
 
 interface RepositoryListProps {
   repositories: GitHubRepository[];
+  hasMore?: boolean;
+  onLoadMore?: () => void;
+  loadingMore?: boolean;
+  totalFetched?: number;
+  canLoadMore?: boolean;
 }
 
-export default function RepositoryList({ repositories }: RepositoryListProps) {
+export default function RepositoryList({
+  repositories,
+  hasMore = false,
+  onLoadMore,
+  loadingMore = false,
+  totalFetched,
+  canLoadMore = hasMore,
+}: RepositoryListProps) {
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
     const now = new Date();
@@ -42,10 +55,18 @@ export default function RepositoryList({ repositories }: RepositoryListProps) {
     return colors[language || ''] || '#8b949e';
   };
 
+  const displayedCount = totalFetched ?? repositories.length;
+
   return (
     <Card className="w-full">
       <CardHeader>
-        <CardTitle>Recent Repositories</CardTitle>
+        <CardTitle className="flex items-center justify-between gap-2">
+          <span>Recent Repositories</span>
+          <Badge variant="outline" className="text-xs font-normal">
+            {displayedCount}
+            {hasMore ? '+' : ''} shown
+          </Badge>
+        </CardTitle>
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
@@ -110,6 +131,28 @@ export default function RepositoryList({ repositories }: RepositoryListProps) {
             ))
           )}
         </div>
+
+        {onLoadMore && hasMore && (
+          <div className="mt-4 flex flex-col items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onLoadMore}
+              disabled={loadingMore || !canLoadMore}
+            >
+              {loadingMore ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Fetching more repositories…
+                </>
+              ) : canLoadMore ? (
+                'Load more repositories'
+              ) : (
+                'Maximum repositories fetched'
+              )}
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

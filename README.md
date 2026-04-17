@@ -95,6 +95,23 @@ Set the following environment variable in Vercel:
 - Responses include:
   - short edge cache hints (`s-maxage` + `stale-while-revalidate`)
   - rate-limit metadata (`remaining`, `resetAt`, `limited`)
+  - pagination metadata per collection (`pagination.repos`, `pagination.events`)
+
+#### Paginating beyond the 100-item limit
+
+The GitHub REST API caps responses at 100 items per page. The proxy follows the
+`page` cursor server-side so clients can request larger aggregate result sets
+with a single call:
+
+| Query param   | Default | Max | Description                              |
+| ------------- | ------- | --- | ---------------------------------------- |
+| `reposLimit`  | 30      | 500 | Total number of repositories to fetch.   |
+| `eventsLimit` | 30      | 300 | Total number of public events to fetch.  |
+
+Example: `/api/github?username=torvalds&reposLimit=300` fetches three pages of
+100 repositories and merges them into a single response. The dashboard UI also
+exposes a **Load more repositories** button that incrementally raises
+`reposLimit` until the per-user maximum is reached.
 
 ## Usage
 

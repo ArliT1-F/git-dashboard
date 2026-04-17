@@ -16,9 +16,13 @@ import {
   GitHubProfileReadme,
   GitHubLocationInsight,
   GitHubContributionYearSummary,
+  GitHubPaginationInfo,
 } from '@/types/github'
 import { Activity, GitBranch, Search, Sparkles } from 'lucide-react'
 const DEBOUNCE_MS = 350
+const DEFAULT_REPOS_LIMIT = 30
+const REPOS_LOAD_MORE_STEP = 50
+const MAX_REPOS_LIMIT = 500
 
 const emptyLocationInsight: GitHubLocationInsight = {
   location: null,
@@ -54,9 +58,13 @@ export default function Index() {
   const [contributionsByYear, setContributionsByYear] = useState<GitHubContributionYearSummary[]>([])
   const [selectedContributionYear, setSelectedContributionYear] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [rateLimitInfo, setRateLimitInfo] = useState<string | null>(null)
   const [requestedUsername, setRequestedUsername] = useState<string | null>(null)
+  const [requestToken, setRequestToken] = useState(0)
+  const [reposLimit, setReposLimit] = useState(DEFAULT_REPOS_LIMIT)
+  const [reposPagination, setReposPagination] = useState<GitHubPaginationInfo | null>(null)
 
   const abortControllerRef = useRef<AbortController | null>(null)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -91,7 +99,10 @@ export default function Index() {
     return `GitHub requests remaining: ${remaining}`
   }
 
-  const fetchGitHubData = async (inputUsername: string) => {
+  const fetchGitHubData = async (
+    inputUsername: string,
+    options: { reposLimit?: number; isLoadMore?: boolean } = {}
+  ) => {
     const normalizedUsername = inputUsername.trim()
     if (!normalizedUsername) return
 
@@ -102,12 +113,23 @@ export default function Index() {
     const controller = new AbortController()
     abortControllerRef.current = controller
 
-    setLoading(true)
+    const effectiveReposLimit = options.reposLimit ?? reposLimit
+    const isLoadMore = Boolean(options.isLoadMore)
+
+    if (isLoadMore) {
+      setLoadingMore(true)
+    } else {
+      setLoading(true)
+    }
     setError(null)
     setRateLimitInfo(null)
 
     try {
-      const response = await fetch(`/api/github?username=${encodeURIComponent(normalizedUsername)}`, {
+      const params = new URLSearchParams({
+        username: normalizedUsername,
+        reposLimit: String(effectiveReposLimit),
+      })
+      const response = await fetch(`/api/github?${params.toString()}`, {
         signal: controller.signal,
       })
 
@@ -130,6 +152,7 @@ export default function Index() {
       setProfileReadme(proxyData.profileReadme || emptyReadme)
       setAchievements(Array.isArray(proxyData.achievements) ? proxyData.achievements : [])
       setLocationInsight(proxyData.locationInsight || emptyLocationInsight)
+      setReposPagination(proxyData.pagination?.repos || null)
       const contributionYears = Array.isArray(proxyData.contributions) ? proxyData.contributions : []
       setContributionsByYear(contributionYears)
 
@@ -158,19 +181,38 @@ export default function Index() {
 
       const message = err instanceof Error ? err.message : 'Failed to fetch data'
       setError(message)
-      setUser(null)
-      setRepos([])
-      setEvents([])
-      setProfileReadme(emptyReadme)
-      setAchievements([])
-      setLocationInsight(emptyLocationInsight)
-      setContributionsByYear([])
-      setSelectedContributionYear(null)
+      if (!isLoadMore) {
+        setUser(null)
+        setRepos([])
+        setEvents([])
+        setProfileReadme(emptyReadme)
+        setAchievements([])
+        setLocationInsight(emptyLocationInsight)
+        setContributionsByYear([])
+        setSelectedContributionYear(null)
+        setReposPagination(null)
+      }
     } finally {
       if (requestId === requestSeqRef.current) {
-        setLoading(false)
+        if (isLoadMore) {
+          setLoadingMore(false)
+        } else {
+          setLoading(false)
+        }
       }
     }
+  }
+
+  const handleLoadMoreRepos = () => {
+    if (!requestedUsername || loading || loadingMore) return
+    if (!reposPagination?.hasMore) return
+
+    const maxAllowed = reposPagination?.maxLimit ?? MAX_REPOS_LIMIT
+    const nextLimit = Math.min(reposLimit + REPOS_LOAD_MORE_STEP, maxAllowed)
+    if (nextLimit <= reposLimit) return
+
+    setReposLimit(nextLimit)
+    fetchGitHubData(requestedUsername, { reposLimit: nextLimit, isLoadMore: true })
   }
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -178,7 +220,9 @@ export default function Index() {
     const normalizedUsername = username.trim()
     if (!normalizedUsername) return
 
+    setReposLimit(DEFAULT_REPOS_LIMIT)
     setRequestedUsername(normalizedUsername)
+    setRequestToken((token) => token + 1)
   }
 
   useEffect(() => {
@@ -189,9 +233,10 @@ export default function Index() {
     }
 
     debounceTimerRef.current = setTimeout(() => {
-      fetchGitHubData(requestedUsername)
+      fetchGitHubData(requestedUsername, { reposLimit: DEFAULT_REPOS_LIMIT })
     }, DEBOUNCE_MS)
-  }, [requestedUsername])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedUsername, requestToken])
 
   const handleInputChange = (value: string) => {
     setUsername(value)
@@ -202,7 +247,10 @@ export default function Index() {
       }
       abortControllerRef.current?.abort()
       setLoading(false)
+      setLoadingMore(false)
       setRequestedUsername(null)
+      setReposPagination(null)
+      setReposLimit(DEFAULT_REPOS_LIMIT)
     }
   }
 
@@ -314,7 +362,19 @@ export default function Index() {
                   onSelectYear={setSelectedContributionYear}
                 />
               )}
-              {repos.length > 0 && <RepositoryList repositories={repos} />}
+              {repos.length > 0 && (
+                <RepositoryList
+                  repositories={repos}
+                  hasMore={Boolean(reposPagination?.hasMore)}
+                  onLoadMore={handleLoadMoreRepos}
+                  loadingMore={loadingMore}
+                  totalFetched={reposPagination?.fetched ?? repos.length}
+                  canLoadMore={
+                    Boolean(reposPagination?.hasMore) &&
+                    reposLimit < (reposPagination?.maxLimit ?? MAX_REPOS_LIMIT)
+                  }
+                />
+              )}
             </div>
 
             <div className="space-y-6">
