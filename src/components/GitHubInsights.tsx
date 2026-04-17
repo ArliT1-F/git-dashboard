@@ -134,9 +134,14 @@ export default function GitHubInsights({
             ) : (
               <div className="flex flex-wrap gap-2">
                 {achievements.map((achievement) => (
-                  <Badge key={achievement.key} variant="secondary" className="text-xs px-3 py-1">
-                    {achievement.label}
-                  </Badge>
+                  <div key={achievement.key} className="group">
+                    <Badge variant={achievement.earned ? 'secondary' : 'outline'} className="text-xs px-3 py-1">
+                      {achievement.label}
+                    </Badge>
+                    <p className="mt-1 text-[11px] text-muted-foreground max-w-[210px]">
+                      {achievement.progress}
+                    </p>
+                  </div>
                 ))}
               </div>
             )}

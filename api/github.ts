@@ -29,10 +29,14 @@ type GitHubContributionYear = {
 }
 
 type GitHubContributionsCollection = {
-  contributionYears: GitHubContributionYear[]
+  contributionYears: number[]
   contributionCalendar: {
     totalContributions: number
     weeks: GitHubContributionWeek[]
+    months: {
+      firstDay: string
+      totalWeeks: number
+    }[]
   }
 }
 
@@ -151,7 +155,7 @@ const LOCATION_TO_TIMEZONE: Record<string, string> = {
   sf: 'America/Los_Angeles',
   sanfrancisco: 'America/Los_Angeles',
   vancouver: 'America/Vancouver',
-  saoPaulo: 'America/Sao_Paulo',
+  saopaulo: 'America/Sao_Paulo',
   buenosaires: 'America/Argentina/Buenos_Aires',
   tokyo: 'Asia/Tokyo',
   seoul: 'Asia/Seoul',
@@ -224,36 +228,36 @@ const buildAchievements = (user: {
 
   return [
     {
-      id: 'followers-100',
-      title: 'Community Magnet',
+      key: 'followers-100',
+      label: 'Community Magnet',
       description: 'Reached 100 followers.',
       earned: followers >= 100,
       progress: `${followers}/100 followers`,
     },
     {
-      id: 'repos-50',
-      title: 'Builder',
+      key: 'repos-50',
+      label: 'Builder',
       description: 'Created at least 50 public repositories.',
       earned: repos >= 50,
       progress: `${repos}/50 repositories`,
     },
     {
-      id: 'gists-25',
-      title: 'Snippet Archivist',
+      key: 'gists-25',
+      label: 'Snippet Archivist',
       description: 'Published at least 25 public gists.',
       earned: gists >= 25,
       progress: `${gists}/25 gists`,
     },
     {
-      id: 'veteran-5y',
-      title: 'GitHub Veteran',
+      key: 'veteran-5y',
+      label: 'GitHub Veteran',
       description: 'Has maintained an account for 5 years.',
       earned: accountYears >= 5,
       progress: `${accountYears}/5 years`,
     },
     {
-      id: 'profile-complete',
-      title: 'Profile Completed',
+      key: 'profile-complete',
+      label: 'Profile Completed',
       description: 'Has bio and website configured.',
       earned: Boolean(user.bio && user.blog),
       progress: user.bio && user.blog ? 'Complete' : 'Add bio + blog',
@@ -320,6 +324,8 @@ const queryContributions = async (
 export default async function handler(request: Request) {
   const requestUrl = new URL(request.url)
   const username = requestUrl.searchParams.get('username')?.trim()
+  const selectedYearParam = requestUrl.searchParams.get('year')
+  const selectedYear = selectedYearParam ? Number.parseInt(selectedYearParam, 10) : null
 
   if (!username) {
     return jsonResponse(
@@ -402,8 +408,8 @@ export default async function handler(request: Request) {
 
     let profileReadme = {
       exists: false,
-      content: null as string | null,
-      htmlUrl: null as string | null,
+      contentHtml: null as string | null,
+      sourceUrl: null as string | null,
       updatedAt: null as string | null,
     }
 
@@ -412,8 +418,8 @@ export default async function handler(request: Request) {
       if (readmePayload.content && readmePayload.encoding === 'base64') {
         profileReadme = {
           exists: true,
-          content: decodeBase64Utf8(readmePayload.content.replace(/\n/g, '')),
-          htmlUrl: readmePayload.html_url || `https://github.com/${username}/${username}#readme`,
+          contentHtml: decodeBase64Utf8(readmePayload.content.replace(/\n/g, '')),
+          sourceUrl: readmePayload.html_url || `https://github.com/${username}/${username}#readme`,
           updatedAt: null,
         }
       }
@@ -427,14 +433,14 @@ export default async function handler(request: Request) {
         totalContributions: number
         maxContributionsOnDay: number
         longestStreak: number
-        days: { date: string; count: number; level: number }[]
+        days: { date: string; contributionCount: number; level: number }[]
       }
     >()
 
     if (contributionsCollection) {
       for (const yearEntry of contributionsCollection.contributionYears) {
-        contributionsByYear.set(yearEntry.year, {
-          totalContributions: yearEntry.totalContributions,
+        contributionsByYear.set(yearEntry, {
+          totalContributions: 0,
           maxContributionsOnDay: 0,
           longestStreak: 0,
           days: [],
@@ -448,18 +454,34 @@ export default async function handler(request: Request) {
       for (const day of allDays) {
         const year = new Date(day.date).getUTCFullYear()
         const existing = contributionsByYear.get(year)
-        if (!existing) continue
-        existing.days.push({
+        if (!existing) {
+          contributionsByYear.set(year, {
+            totalContributions: 0,
+            maxContributionsOnDay: 0,
+            longestStreak: 0,
+            days: [],
+          })
+        }
+        const target = contributionsByYear.get(year)
+        if (!target) continue
+        target.days.push({
           date: day.date,
-          count: day.contributionCount,
+          contributionCount: day.contributionCount,
           level: day.contributionCount <= 0 ? 0 : day.contributionCount <= 2 ? 1 : day.contributionCount <= 5 ? 2 : day.contributionCount <= 9 ? 3 : 4,
         })
       }
 
-      for (const [, value] of contributionsByYear) {
+      for (const [year, value] of contributionsByYear) {
         value.days.sort((a, b) => (a.date < b.date ? -1 : 1))
-        value.maxContributionsOnDay = value.days.reduce((max, day) => Math.max(max, day.count), 0)
-        value.longestStreak = calculateLongestStreak(value.days.map((day) => ({ date: day.date, count: day.count })))
+        value.totalContributions = value.days.reduce((sum, day) => sum + day.contributionCount, 0)
+        value.maxContributionsOnDay = value.days.reduce(
+          (max, day) => Math.max(max, day.contributionCount),
+          0
+        )
+        value.longestStreak = calculateLongestStreak(
+          value.days.map((day) => ({ date: day.date, count: day.contributionCount }))
+        )
+        contributionsByYear.set(year, value)
       }
     }
 
@@ -470,8 +492,19 @@ export default async function handler(request: Request) {
         longestStreak: data.longestStreak,
         maxContributionsOnDay: data.maxContributionsOnDay,
         days: data.days,
+        monthlyTotals: Array.from(
+          data.days.reduce((map, day) => {
+            const month = new Date(day.date).toLocaleDateString('en-US', { month: 'short' })
+            map.set(month, (map.get(month) || 0) + day.contributionCount)
+            return map
+          }, new Map<string, number>())
+        ).map(([month, total]) => ({ month, total })),
       }))
       .sort((a, b) => b.year - a.year)
+
+    const filteredContributionYears = Number.isInteger(selectedYear)
+      ? contributionYears.filter((item) => item.year === selectedYear)
+      : contributionYears
 
     const remainingCandidates = [
       userRateLimit.remaining,
@@ -510,7 +543,8 @@ export default async function handler(request: Request) {
       profileReadme,
       locationInsight,
       achievements,
-      contributionYears,
+      contributions: filteredContributionYears,
+      availableContributionYears: contributionYears.map((item) => item.year),
       warnings,
       rateLimit: {
         remaining,
