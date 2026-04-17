@@ -105,6 +105,6 @@ export interface GitHubDashboardPayload {
   profileReadme: GitHubProfileReadme
   locationInsight: GitHubLocationInsight
   achievements: GitHubAchievement[]
-  contributions: GitHubContributionYearSummary
+  contributions: GitHubContributionYearSummary[]
   availableContributionYears: number[]
 }

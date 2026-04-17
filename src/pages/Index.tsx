@@ -134,7 +134,12 @@ export default function Index() {
       setContributionsByYear(contributionYears)
 
       const currentYear = new Date().getFullYear()
+      const availableYears = Array.isArray(proxyData.availableContributionYears)
+        ? proxyData.availableContributionYears
+        : contributionYears.map((entry) => entry.year)
       const preferredYear =
+        availableYears.find((year) => year === currentYear) ||
+        availableYears[0] ||
         contributionYears.find((entry) => entry.year === currentYear)?.year ||
         contributionYears[0]?.year ||
         null
