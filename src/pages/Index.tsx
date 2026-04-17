@@ -18,15 +18,7 @@ import {
   GitHubContributionYearSummary,
 } from '@/types/github'
 import { Activity, GitBranch, Search, Sparkles } from 'lucide-react'
-
 const DEBOUNCE_MS = 350
-
-const emptyReadme: GitHubProfileReadme = {
-  exists: false,
-  contentHtml: null,
-  sourceUrl: null,
-  updatedAt: null,
-}
 
 const emptyLocationInsight: GitHubLocationInsight = {
   location: null,
@@ -42,6 +34,13 @@ const emptyContributionSummary: GitHubContributionYearSummary = {
   longestStreak: 0,
   days: [],
   monthlyTotals: [],
+}
+
+const emptyReadme: GitHubProfileReadme = {
+  exists: false,
+  contentHtml: null,
+  sourceUrl: null,
+  updatedAt: null,
 }
 
 export default function Index() {
