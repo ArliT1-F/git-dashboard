@@ -16,7 +16,14 @@ export default function TimeTracker() {
   useEffect(() => {
     const savedEntries = localStorage.getItem('timeEntries');
     if (savedEntries) {
-      setEntries(JSON.parse(savedEntries));
+      try {
+        const parsedEntries: unknown = JSON.parse(savedEntries);
+        if (Array.isArray(parsedEntries)) {
+          setEntries(parsedEntries as TimeEntry[]);
+        }
+      } catch {
+        localStorage.removeItem('timeEntries');
+      }
     }
 
     const savedTracking = localStorage.getItem('isTracking');
@@ -24,14 +31,23 @@ export default function TimeTracker() {
     const savedDescription = localStorage.getItem('currentDescription');
 
     if (savedTracking === 'true' && savedStartTime) {
+      const parsedStartTime = Number.parseInt(savedStartTime, 10);
+      if (Number.isNaN(parsedStartTime)) {
+        localStorage.removeItem('isTracking');
+        localStorage.removeItem('startTime');
+        localStorage.removeItem('currentDescription');
+        return;
+      }
+
       setIsTracking(true);
-      setStartTime(parseInt(savedStartTime));
+      setStartTime(parsedStartTime);
+      setCurrentTime(Date.now() - parsedStartTime);
       setDescription(savedDescription || '');
     }
   }, []);
 
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    let interval: ReturnType<typeof setInterval> | undefined;
     
     if (isTracking && startTime) {
       interval = setInterval(() => {

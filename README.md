@@ -74,6 +74,26 @@ pnpm run build
 pnpm run preview
 ```
 
+## Deploying on Vercel
+
+The project includes a `vercel.json` tuned for Vite + SPA routing and an API proxy
+at `api/github.ts` to avoid exposing GitHub tokens in the browser.
+
+### Environment Variables
+
+Set the following environment variable in Vercel:
+
+- `GITHUB_TOKEN` (optional but strongly recommended): a GitHub token used by the
+  serverless proxy to increase API rate limits and improve reliability.
+
+### API Proxy
+
+- Frontend requests are sent to `/api/github?username=<name>`.
+- The serverless function fetches profile, repositories, and events from GitHub.
+- Responses include:
+  - short edge cache hints (`s-maxage` + `stale-while-revalidate`)
+  - rate-limit metadata (`remaining`, `resetAt`, `limited`)
+
 ## Usage
 
 1. Enter a GitHub username in the search bar
