@@ -7,11 +7,15 @@ export interface GitHubUser {
   location: string | null
   company: string | null
   blog: string | null
+  twitter_username?: string | null
+  hireable?: boolean | null
+  type?: string
   public_repos: number
   public_gists: number
   followers: number
   following: number
   created_at: string
+  updated_at?: string
 }
 
 export interface GitHubRepository {
@@ -44,4 +48,63 @@ export interface TimeEntry {
   startTime: number
   endTime: number
   duration: number
+}
+
+export interface GitHubProfileReadme {
+  exists: boolean
+  contentHtml: string | null
+  sourceUrl: string | null
+  updatedAt: string | null
+}
+
+export interface GitHubLocationInsight {
+  location: string | null
+  timezone: string | null
+  inferredFromLocation: boolean
+  source: string | null
+}
+
+export interface GitHubAchievement {
+  key: string
+  label: string
+  description: string
+  earned: boolean
+  progress: string
+}
+
+export interface GitHubContributionDay {
+  date: string
+  contributionCount: number
+  level: number
+}
+
+export interface GitHubContributionMonthTotal {
+  month: string
+  total: number
+}
+
+export interface GitHubContributionYearSummary {
+  year: number
+  totalContributions: number
+  maxContributionsOnDay: number
+  longestStreak: number
+  days: GitHubContributionDay[]
+  monthlyTotals: GitHubContributionMonthTotal[]
+}
+
+export interface GitHubDashboardPayload {
+  user: GitHubUser
+  repos: GitHubRepository[]
+  events: GitHubEvent[]
+  warnings?: string[]
+  rateLimit?: {
+    remaining: number | null
+    resetAt: string | null
+    limited: boolean
+  }
+  profileReadme: GitHubProfileReadme
+  locationInsight: GitHubLocationInsight
+  achievements: GitHubAchievement[]
+  contributions: GitHubContributionYearSummary
+  availableContributionYears: number[]
 }

@@ -9,6 +9,7 @@ A developer dashboard for tracking GitHub activity and development time.
 - **GitHub Profile Viewer** - Search and view any GitHub user's profile
 - **Repository List** - Browse recent repositories with language, stars, and forks
 - **Contribution Activity** - View recent GitHub events (commits, PRs, stars, forks)
+- **Deep Profile Insights** - Display achievements, profile README, inferred timezone, and yearly contribution breakdowns
 - **Time Tracker** - Track development time with start/stop timer and session logs
 
 ## Tech Stack
@@ -28,6 +29,7 @@ src/
 ├── components/
 │   ├── ui/                    # shadcn/ui components
 │   ├── ContributionActivity.tsx
+│   ├── GitHubInsights.tsx
 │   ├── GitHubProfile.tsx
 │   ├── RepositoryList.tsx
 │   └── TimeTracker.tsx
@@ -89,7 +91,8 @@ Set the following environment variable in Vercel:
 ### API Proxy
 
 - Frontend requests are sent to `/api/github?username=<name>`.
-- The serverless function fetches profile, repositories, and events from GitHub.
+- The serverless function fetches profile, repositories, events, profile README, achievements,
+  and contribution insights from GitHub.
 - Responses include:
   - short edge cache hints (`s-maxage` + `stale-while-revalidate`)
   - rate-limit metadata (`remaining`, `resetAt`, `limited`)
