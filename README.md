@@ -1,6 +1,6 @@
 # Git Dashboard
 
-A developer dashboard for tracking GitHub activity and development time.
+A GitHub intelligence dashboard with a landing-page experience for exploring user profiles, repositories, and contribution patterns.
 
 ![GitHub Dark Theme](https://img.shields.io/badge/theme-GitHub%20Dark-0d1117)
 
@@ -10,7 +10,7 @@ A developer dashboard for tracking GitHub activity and development time.
 - **Repository List** - Browse recent repositories with language, stars, and forks
 - **Contribution Activity** - View recent GitHub events (commits, PRs, stars, forks)
 - **Deep Profile Insights** - Display achievements, profile README, inferred timezone, and yearly contribution breakdowns
-- **Time Tracker** - Track development time with start/stop timer and session logs
+- **Landing Experience** - Minimal GitHub-themed motion, splash background art, and a polished search-first hero section
 
 ## Tech Stack
 
@@ -31,8 +31,7 @@ src/
 │   ├── ContributionActivity.tsx
 │   ├── GitHubInsights.tsx
 │   ├── GitHubProfile.tsx
-│   ├── RepositoryList.tsx
-│   └── TimeTracker.tsx
+│   └── RepositoryList.tsx
 ├── lib/
 │   └── utils.ts               # Utility functions
 ├── pages/
@@ -101,7 +100,7 @@ Set the following environment variable in Vercel:
 
 1. Enter a GitHub username in the search bar
 2. View the user's profile, repositories, and recent activity
-3. Use the Time Tracker to log development sessions (stored in localStorage)
+3. Explore profile insights, yearly contributions, and rendered profile README content
 
 ## License
 
