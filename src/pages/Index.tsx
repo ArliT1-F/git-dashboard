@@ -2,31 +2,57 @@ import { useEffect, useRef, useState } from 'react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import GitHubProfile from '@/components/GitHubProfile'
+import GitHubInsights from '@/components/GitHubInsights'
 import RepositoryList from '@/components/RepositoryList'
 import ContributionActivity from '@/components/ContributionActivity'
 import TimeTracker from '@/components/TimeTracker'
-import { GitHubUser, GitHubRepository, GitHubEvent } from '@/types/github'
+import {
+  GitHubDashboardPayload,
+  GitHubUser,
+  GitHubRepository,
+  GitHubEvent,
+  GitHubAchievement,
+  GitHubProfileReadme,
+  GitHubLocationInsight,
+  GitHubContributionYearSummary,
+} from '@/types/github'
 import { Search } from 'lucide-react'
 
-interface GitHubProxyResponse {
-  user: GitHubUser
-  repos: GitHubRepository[]
-  events: GitHubEvent[]
-  warnings?: string[]
-  rateLimit?: {
-    remaining: number | null
-    resetAt: string | null
-    limited: boolean
-  }
+const DEBOUNCE_MS = 350
+
+const emptyReadme: GitHubProfileReadme = {
+  exists: false,
+  contentHtml: null,
+  sourceUrl: null,
+  updatedAt: null,
 }
 
-const DEBOUNCE_MS = 350
+const emptyLocationInsight: GitHubLocationInsight = {
+  location: null,
+  timezone: null,
+  inferredFromLocation: false,
+  source: null,
+}
+
+const emptyContributionSummary: GitHubContributionYearSummary = {
+  year: new Date().getFullYear(),
+  totalContributions: 0,
+  maxContributionsOnDay: 0,
+  longestStreak: 0,
+  days: [],
+  monthlyTotals: [],
+}
 
 export default function Index() {
   const [username, setUsername] = useState('')
   const [user, setUser] = useState<GitHubUser | null>(null)
   const [repos, setRepos] = useState<GitHubRepository[]>([])
   const [events, setEvents] = useState<GitHubEvent[]>([])
+  const [profileReadme, setProfileReadme] = useState<GitHubProfileReadme>(emptyReadme)
+  const [achievements, setAchievements] = useState<GitHubAchievement[]>([])
+  const [locationInsight, setLocationInsight] = useState<GitHubLocationInsight>(emptyLocationInsight)
+  const [contributionsByYear, setContributionsByYear] = useState<GitHubContributionYearSummary[]>([])
+  const [selectedContributionYear, setSelectedContributionYear] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [rateLimitInfo, setRateLimitInfo] = useState<string | null>(null)
@@ -45,7 +71,7 @@ export default function Index() {
     }
   }, [])
 
-  const formatRateLimitMessage = (rateLimit: GitHubProxyResponse['rateLimit']) => {
+  const formatRateLimitMessage = (rateLimit: GitHubDashboardPayload['rateLimit']) => {
     if (!rateLimit) return null
 
     const { remaining, resetAt } = rateLimit
@@ -86,7 +112,7 @@ export default function Index() {
       })
 
       const responseData: unknown = await response.json()
-      const payload = responseData as Partial<GitHubProxyResponse> & { message?: string }
+      const payload = responseData as Partial<GitHubDashboardPayload> & { message?: string }
 
       if (!response.ok || !payload.user) {
         throw new Error(payload.message || 'Failed to fetch GitHub data')
@@ -96,11 +122,23 @@ export default function Index() {
         return
       }
 
-      const proxyData = payload as GitHubProxyResponse
+      const proxyData = payload as GitHubDashboardPayload
 
       setUser(proxyData.user)
       setRepos(Array.isArray(proxyData.repos) ? proxyData.repos : [])
       setEvents(Array.isArray(proxyData.events) ? proxyData.events : [])
+      setProfileReadme(proxyData.profileReadme || emptyReadme)
+      setAchievements(Array.isArray(proxyData.achievements) ? proxyData.achievements : [])
+      setLocationInsight(proxyData.locationInsight || emptyLocationInsight)
+      const contributionYears = Array.isArray(proxyData.contributions) ? proxyData.contributions : []
+      setContributionsByYear(contributionYears)
+
+      const currentYear = new Date().getFullYear()
+      const preferredYear =
+        contributionYears.find((entry) => entry.year === currentYear)?.year ||
+        contributionYears[0]?.year ||
+        null
+      setSelectedContributionYear(preferredYear)
 
       const rateLimitMessage = formatRateLimitMessage(proxyData.rateLimit)
       setRateLimitInfo(rateLimitMessage)
@@ -118,6 +156,11 @@ export default function Index() {
       setUser(null)
       setRepos([])
       setEvents([])
+      setProfileReadme(emptyReadme)
+      setAchievements([])
+      setLocationInsight(emptyLocationInsight)
+      setContributionsByYear([])
+      setSelectedContributionYear(null)
     } finally {
       if (requestId === requestSeqRef.current) {
         setLoading(false)
@@ -158,6 +201,13 @@ export default function Index() {
     }
   }
 
+  const activeContributionSummary =
+    contributionsByYear.find((entry) => entry.year === selectedContributionYear) ||
+    contributionsByYear[0] ||
+    null
+
+  const contributionYears = contributionsByYear.map((entry) => entry.year)
+
   return (
     <div className="min-h-screen p-6">
       <div className="max-w-7xl mx-auto space-y-6">
@@ -188,6 +238,21 @@ export default function Index() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
             {user && <GitHubProfile user={user} />}
+            {user && (
+              <GitHubInsights
+                user={user}
+                profileReadmeHtml={profileReadme.contentHtml}
+                profileReadmeSourceUrl={profileReadme.sourceUrl}
+                achievements={achievements}
+                locationInsight={locationInsight}
+                contributionSummary={activeContributionSummary}
+                contributionDays={activeContributionSummary?.days || []}
+                contributionMonthlyTotals={activeContributionSummary?.monthlyTotals || []}
+                selectedYear={selectedContributionYear || activeContributionSummary?.year || new Date().getFullYear()}
+                availableYears={contributionYears}
+                onSelectYear={setSelectedContributionYear}
+              />
+            )}
             {repos.length > 0 && <RepositoryList repositories={repos} />}
           </div>
 

@@ -2,7 +2,7 @@ import { GitHubUser } from '@/types/github';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { MapPin, Building2, Link as LinkIcon, Calendar } from 'lucide-react';
+import { MapPin, Building2, Link as LinkIcon, Calendar, AtSign, Briefcase } from 'lucide-react';
 
 interface GitHubProfileProps {
   user: GitHubUser;
@@ -80,6 +80,20 @@ export default function GitHubProfile({ user }: GitHubProfileProps) {
                 <Calendar className="w-4 h-4" />
                 <span>Joined {formatDate(user.created_at)}</span>
               </div>
+
+              {user.twitter_username && (
+                <div className="flex items-center gap-1 text-muted-foreground">
+                  <AtSign className="w-4 h-4" />
+                  <a
+                    href={`https://twitter.com/${user.twitter_username}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:underline"
+                  >
+                    @{user.twitter_username}
+                  </a>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap gap-4 pt-2">
@@ -99,6 +113,12 @@ export default function GitHubProfile({ user }: GitHubProfileProps) {
                 <span className="font-bold mr-1">{user.public_gists}</span>
                 Gists
               </Badge>
+              {typeof user.hireable === 'boolean' && (
+                <Badge variant={user.hireable ? 'default' : 'outline'} className="text-base px-4 py-2">
+                  <Briefcase className="w-4 h-4 mr-1" />
+                  {user.hireable ? 'Open to Work' : 'Not Hireable'}
+                </Badge>
+              )}
             </div>
           </div>
         </div>
