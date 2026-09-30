@@ -16,6 +16,8 @@ export interface GitHubUser {
   following: number
   created_at: string
   updated_at?: string
+  /** Inferred server-side from the free-text `location` field. */
+  timezone?: string | null
 }
 
 export interface GitHubRepository {
@@ -27,7 +29,18 @@ export interface GitHubRepository {
   language: string | null
   stargazers_count: number
   forks_count: number
-  updated_at: string
+  watchers_count: number
+  open_issues_count: number
+  created_at: string | null
+  updated_at: string | null
+  pushed_at: string | null
+  fork: boolean
+  archived: boolean
+  is_template: boolean
+  default_branch: string | null
+  homepage: string | null
+  topics: string[]
+  license: { spdx_id: string | null; name: string | null } | null
 }
 
 export interface GitHubEvent {
@@ -37,8 +50,15 @@ export interface GitHubEvent {
   created_at: string
   payload: {
     action?: string
+    ref?: string
     ref_type?: string
-    commits?: { message: string }[]
+    size?: number
+    distinct_size?: number
+    commits?: { sha: string; message: string }[]
+    pull_request?: { number: number; title: string; merged: boolean; html_url: string }
+    issue?: { number: number; title: string; html_url: string }
+    forkee?: { full_name: string; html_url: string }
+    release?: { tag_name: string; name: string | null; html_url: string }
   }
 }
 
@@ -88,6 +108,7 @@ export interface GitHubContributionYearSummary {
   totalContributions: number
   maxContributionsOnDay: number
   longestStreak: number
+  activeDays: number
   days: GitHubContributionDay[]
   monthlyTotals: GitHubContributionMonthTotal[]
 }
@@ -112,10 +133,20 @@ export interface GitHubDashboardPayload {
   pagination?: {
     repos: GitHubPaginationInfo
     events: GitHubPaginationInfo
+    years: GitHubPaginationInfo
   }
   profileReadme: GitHubProfileReadme
   locationInsight: GitHubLocationInsight
   achievements: GitHubAchievement[]
   contributions: GitHubContributionYearSummary[]
+  /** Years whose daily calendar is included in this payload. */
+  loadedContributionYears: number[]
+  /** Every year GitHub reports activity for, newest first. */
   availableContributionYears: number[]
+}
+
+export interface GitHubErrorPayload {
+  message?: string
+  errorCode?: string
+  rateLimit?: GitHubDashboardPayload['rateLimit']
 }

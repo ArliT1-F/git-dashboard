@@ -1,12 +1,14 @@
 {
-  "name": "shadcnui",
+  "name": "git-dashboard",
   "type": "module",
   "packageManager": "pnpm@8.10.0",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint --quiet ./src",
-    "preview": "vite preview"
+    "test": "node --experimental-strip-types --test 'tests/*.test.ts'",
+    "preview": "vite preview",
+    "smoke:render": "node scripts/render-smoke.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
