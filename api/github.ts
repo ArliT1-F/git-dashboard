@@ -1,14 +1,26 @@
 const GITHUB_API_BASE_URL = 'https://api.github.com'
-const REQUEST_TIMEOUT_MS = 15_000
-const CACHE_CONTROL_HEADER = 's-maxage=60, stale-while-revalidate=300'
+const GITHUB_GRAPHQL_URL = 'https://api.github.com/graphql'
+const REQUEST_TIMEOUT_MS = 20_000
+const CACHE_CONTROL_HEADER = 's-maxage=120, stale-while-revalidate=600'
+const NO_STORE_HEADER = 'no-store'
 
 const GITHUB_MAX_PER_PAGE = 100
 const DEFAULT_REPOS_LIMIT = 30
 const MAX_REPOS_LIMIT = 500
 const DEFAULT_EVENTS_LIMIT = 30
-// GitHub caps the events feed at 300 total items across 10 pages of 30.
+// GitHub exposes ~300 public events per user and accepts up to 100 per page
+// (verified against the live API), so large feeds need 3 round trips, not 10.
 const MAX_EVENTS_LIMIT = 300
-const EVENTS_PER_PAGE = 30
+const EVENTS_PER_PAGE = 100
+
+// One GraphQL request carries one alias per year, so a whole contribution
+// history costs a single HTTP request (and a single rate-limit point).
+// GitHub rejects (or stalls on) queries with more than ~12 contribution
+// calendars, so 12 is the hard ceiling.
+const DEFAULT_CONTRIBUTION_YEARS = 5
+const MAX_CONTRIBUTION_YEARS = 12
+
+const LOW_RATE_LIMIT_THRESHOLD = 3
 
 export const config = {
   runtime: 'edge',
@@ -28,28 +40,19 @@ type GitHubContributionWeek = {
 }
 
 type GitHubContributionsCollection = {
-  contributionYears: number[]
-  contributionCalendar: {
-    totalContributions: number
-    weeks: GitHubContributionWeek[]
-    months: {
-      firstDay: string
-      totalWeeks: number
-    }[]
-  }
+  contributionYears?: number[]
+  contributionCalendar?: {
+    totalContributions?: number
+    weeks?: GitHubContributionWeek[]
+  } | null
 }
 
 type GitHubUserContributionsResponse = {
   data?: {
-    user?: {
-      contributionsCollection?: GitHubContributionsCollection
-    } | null
+    user?: Record<string, GitHubContributionsCollection | undefined> | null
+    rateLimit?: { cost?: number; remaining?: number; resetAt?: string }
   }
-  errors?: { message?: string }[]
-}
-
-type GitHubReadmeMetadata = {
-  html_url?: string
+  errors?: { message?: string; type?: string }[]
 }
 
 type RateLimitInfo = {
@@ -57,6 +60,64 @@ type RateLimitInfo = {
   resetAt: string | null
   resetAtMs: number | null
   limited: boolean
+}
+
+export type ContributionDay = {
+  date: string
+  contributionCount: number
+  level: number
+}
+
+export type ContributionYearSummary = {
+  year: number
+  totalContributions: number
+  maxContributionsOnDay: number
+  longestStreak: number
+  activeDays: number
+  days: ContributionDay[]
+  monthlyTotals: { month: string; total: number }[]
+}
+
+export type GitHubRepoSummary = {
+  id: number
+  name: string
+  full_name: string
+  html_url: string
+  description: string | null
+  language: string | null
+  stargazers_count: number
+  forks_count: number
+  watchers_count: number
+  open_issues_count: number
+  created_at: string | null
+  updated_at: string | null
+  pushed_at: string | null
+  fork: boolean
+  archived: boolean
+  is_template: boolean
+  default_branch: string | null
+  homepage: string | null
+  topics: string[]
+  license: { spdx_id: string | null; name: string | null } | null
+}
+
+export type GitHubEventSummary = {
+  id: string
+  type: string
+  repo: { name: string }
+  created_at: string
+  payload: {
+    action?: string
+    ref?: string
+    ref_type?: string
+    size?: number
+    distinct_size?: number
+    commits?: { sha: string; message: string }[]
+    pull_request?: { number: number; title: string; merged: boolean; html_url: string }
+    issue?: { number: number; title: string; html_url: string }
+    forkee?: { full_name: string; html_url: string }
+    release?: { tag_name: string; name: string | null; html_url: string }
+  }
 }
 
 const emptyRateLimit = (): RateLimitInfo => ({
@@ -79,7 +140,7 @@ const jsonResponse = (
     },
   })
 
-const parseRateLimitInfo = (response: Response): RateLimitInfo => {
+export const parseRateLimitInfo = (response: Response): RateLimitInfo => {
   const remainingRaw = response.headers.get('x-ratelimit-remaining')
   const resetRaw = response.headers.get('x-ratelimit-reset')
   const parsedRemaining =
@@ -97,7 +158,7 @@ const parseRateLimitInfo = (response: Response): RateLimitInfo => {
   }
 }
 
-const mergeRateLimits = (limits: RateLimitInfo[]): RateLimitInfo => {
+export const mergeRateLimits = (limits: RateLimitInfo[]): RateLimitInfo => {
   const remainings = limits
     .map((limit) => limit.remaining)
     .filter((value): value is number => typeof value === 'number')
@@ -106,14 +167,21 @@ const mergeRateLimits = (limits: RateLimitInfo[]): RateLimitInfo => {
     .filter((value): value is number => typeof value === 'number')
 
   const remaining = remainings.length > 0 ? Math.min(...remainings) : null
-  // When we're rate-limited we want the soonest reset; otherwise the latest is fine for display.
-  const resetMs = resetMsValues.length > 0 ? Math.min(...resetMsValues) : null
+  const limited = remaining !== null && remaining <= 0
+  // Rate-limited: show when the window reopens (soonest reset). Otherwise the
+  // latest reset is the window we are currently counting down to.
+  const resetMs =
+    resetMsValues.length === 0
+      ? null
+      : limited
+        ? Math.min(...resetMsValues)
+        : Math.max(...resetMsValues)
 
   return {
     remaining,
     resetAt: resetMs === null ? null : new Date(resetMs).toISOString(),
     resetAtMs: resetMs,
-    limited: remaining !== null && remaining <= 0,
+    limited,
   }
 }
 
@@ -157,9 +225,11 @@ const githubRequest = async (
   })
 }
 
-const parseIntParam = (raw: string | null, fallback: number, min: number, max: number) => {
-  if (!raw) return fallback
-  const parsed = Number.parseInt(raw, 10)
+export const parseIntParam = (raw: string | null, fallback: number, min: number, max: number) => {
+  if (raw === null) return fallback
+  const trimmed = raw.trim()
+  if (!/^\d+$/.test(trimmed)) return fallback
+  const parsed = Number.parseInt(trimmed, 10)
   if (!Number.isFinite(parsed)) return fallback
   return Math.min(Math.max(parsed, min), max)
 }
@@ -168,11 +238,19 @@ type PaginatedFetchResult<T> = {
   items: T[]
   rateLimits: RateLimitInfo[]
   warning: string | null
-  truncated: boolean
+  hasMore: boolean
   totalFetched: number
 }
 
-const fetchPaginated = async <T>(
+/**
+ * Walks GitHub's `page` cursor until `limit` items are collected.
+ *
+ * `hasMore` reports whether GitHub still holds items we have not fetched. A
+ * full page at the very end of the window means "probably more" (we cannot know
+ * without spending another request), so the client can keep offering "load
+ * more" instead of silently truncating the list.
+ */
+export const fetchPaginated = async <T>(
   buildPath: (page: number, perPage: number) => string,
   endpointLabel: string,
   signal: AbortSignal,
@@ -182,19 +260,31 @@ const fetchPaginated = async <T>(
   const items: T[] = []
   const rateLimits: RateLimitInfo[] = []
   let warning: string | null = null
-  let truncated = false
+  let hasMore = false
 
   const effectiveLimit = Math.max(limit, 0)
   const perPage = Math.min(perPageCap, GITHUB_MAX_PER_PAGE)
   const maxPages = Math.max(1, Math.ceil(effectiveLimit / perPage))
 
   for (let page = 1; page <= maxPages; page += 1) {
-    const response = await githubRequest(buildPath(page, perPage), signal)
+    let response: Response
+    try {
+      response = await githubRequest(buildPath(page, perPage), signal)
+    } catch (error) {
+      // Network/abort failures: keep whatever we already collected so the UI can
+      // still render partial data.
+      if (error instanceof Error && error.name === 'AbortError') throw error
+      warning = `Loaded profile, but ${endpointLabel} could not be reached.`
+      hasMore = items.length > 0
+      break
+    }
+
     const rateLimit = parseRateLimitInfo(response)
     rateLimits.push(rateLimit)
 
     if (!response.ok) {
       warning = await buildEndpointWarning(endpointLabel, response, rateLimit)
+      hasMore = items.length > 0
       break
     }
 
@@ -203,29 +293,38 @@ const fetchPaginated = async <T>(
       payload = await response.json()
     } catch {
       warning = `Loaded profile, but ${endpointLabel} returned an unexpected response.`
+      hasMore = items.length > 0
       break
     }
 
-    if (!Array.isArray(payload)) break
+    if (!Array.isArray(payload)) {
+      warning = `Loaded profile, but ${endpointLabel} returned an unexpected response.`
+      hasMore = items.length > 0
+      break
+    }
 
     const pageItems = payload as T[]
     const remainingSlots = effectiveLimit - items.length
-    if (remainingSlots <= 0) {
-      if (pageItems.length > 0) truncated = true
-      break
-    }
 
     if (pageItems.length > remainingSlots) {
       items.push(...pageItems.slice(0, remainingSlots))
-      truncated = true
+      hasMore = true
       break
     }
 
     items.push(...pageItems)
-    if (pageItems.length < perPage) break
+
+    if (pageItems.length < perPage) {
+      // GitHub ran out of data before we ran out of budget.
+      hasMore = false
+      break
+    }
+
+    // Full page: there are probably more items upstream.
+    hasMore = true
   }
 
-  return { items, rateLimits, warning, truncated, totalFetched: items.length }
+  return { items, rateLimits, warning, hasMore, totalFetched: items.length }
 }
 
 const buildEndpointWarning = async (
@@ -271,44 +370,175 @@ const LOCATION_TO_TIMEZONE: Record<string, string> = {
   delhi: 'Asia/Kolkata',
   mumbai: 'Asia/Kolkata',
   bangalore: 'Asia/Kolkata',
+  bengaluru: 'Asia/Kolkata',
+  hyderabad: 'Asia/Kolkata',
+  pune: 'Asia/Kolkata',
   sydney: 'Australia/Sydney',
   melbourne: 'Australia/Melbourne',
+  brisbane: 'Australia/Brisbane',
+  perth: 'Australia/Perth',
   auckland: 'Pacific/Auckland',
   dubai: 'Asia/Dubai',
   cairo: 'Africa/Cairo',
+  lagos: 'Africa/Lagos',
+  nairobi: 'Africa/Nairobi',
+  warsaw: 'Europe/Warsaw',
+  stockholm: 'Europe/Stockholm',
+  oslo: 'Europe/Oslo',
+  copenhagen: 'Europe/Copenhagen',
+  helsinki: 'Europe/Helsinki',
+  dublin: 'Europe/Dublin',
+  zurich: 'Europe/Zurich',
+  vienna: 'Europe/Vienna',
+  prague: 'Europe/Prague',
+  moscow: 'Europe/Moscow',
+  istanbul: 'Europe/Istanbul',
+  telaviv: 'Asia/Jerusalem',
+  bangkok: 'Asia/Bangkok',
+  jakarta: 'Asia/Jakarta',
+  manila: 'Asia/Manila',
+  hongkong: 'Asia/Hong_Kong',
+  shanghai: 'Asia/Shanghai',
+  beijing: 'Asia/Shanghai',
+  taipei: 'Asia/Taipei',
+  mexicocity: 'America/Mexico_City',
+  bogota: 'America/Bogota',
+  santiago: 'America/Santiago',
+  lima: 'America/Lima',
 }
 
-const inferTimezoneFromLocation = (location: string | null | undefined) => {
+export const inferTimezoneFromLocation = (location: string | null | undefined) => {
   if (!location) return null
   const normalized = location.toLowerCase().replace(/[^a-z]/g, '')
   if (!normalized) return null
 
+  let bestMatch: { token: string; timezone: string } | null = null
   for (const [token, timezone] of Object.entries(LOCATION_TO_TIMEZONE)) {
-    if (normalized.includes(token.toLowerCase().replace(/[^a-z]/g, ''))) {
-      return timezone
+    const normalizedToken = token.toLowerCase().replace(/[^a-z]/g, '')
+    if (!normalizedToken || !normalized.includes(normalizedToken)) continue
+    // Longest matching token wins so "sanfrancisco" beats a stray "sf" match.
+    if (!bestMatch || normalizedToken.length > bestMatch.token.length) {
+      bestMatch = { token: normalizedToken, timezone }
     }
   }
 
-  return null
+  return bestMatch?.timezone ?? null
 }
 
-const calculateLongestStreak = (days: { date: string; count: number }[]) => {
+/** Days since the Unix epoch, used to compare calendar days without timezones. */
+const toDayNumber = (date: string) => {
+  const [year, month, day] = date.split('-').map((part) => Number.parseInt(part, 10))
+  if (!year || !month || !day) return Number.NaN
+  return Date.UTC(year, month - 1, day) / 86_400_000
+}
+
+/**
+ * Longest run of consecutive calendar days with at least one contribution.
+ * Comparing dates (instead of array positions) keeps the maths correct even
+ * when GitHub omits days from the calendar.
+ */
+export const calculateLongestStreak = (days: { date: string; count: number }[]) => {
   let longestStreak = 0
   let currentStreak = 0
+  let previousDay: number | null = null
 
   for (const day of days) {
+    const dayNumber = toDayNumber(day.date)
     if (day.count > 0) {
-      currentStreak += 1
+      currentStreak =
+        previousDay !== null && dayNumber === previousDay + 1 ? currentStreak + 1 : 1
       longestStreak = Math.max(longestStreak, currentStreak)
     } else {
       currentStreak = 0
     }
+    previousDay = dayNumber
   }
 
   return longestStreak
 }
 
-const buildAchievements = (user: {
+/** Run of consecutive contribution days ending on (or one day after) `today`. */
+export const calculateStreakEndingOn = (days: { date: string; count: number }[], today: string) => {
+  const todayNumber = toDayNumber(today)
+  const byDay = new Map<number, number>()
+  for (const day of days) {
+    byDay.set(toDayNumber(day.date), day.count)
+  }
+
+  // A streak stays "alive" when today has no contributions yet, so start the
+  // walk at today and step back through the previous day when it is empty.
+  let cursor = todayNumber
+  if ((byDay.get(cursor) ?? 0) === 0) {
+    cursor -= 1
+  }
+
+  let streak = 0
+  while ((byDay.get(cursor) ?? 0) > 0) {
+    streak += 1
+    cursor -= 1
+  }
+
+  return streak
+}
+
+export const contributionLevel = (count: number) => {
+  if (count <= 0) return 0
+  if (count <= 2) return 1
+  if (count <= 5) return 2
+  if (count <= 9) return 3
+  return 4
+}
+
+const MONTH_LABELS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+]
+
+export const buildContributionYear = (
+  year: number,
+  rawDays: GitHubContributionDay[]
+): ContributionYearSummary => {
+  const days: ContributionDay[] = rawDays
+    .map((day) => ({
+      date: day.date,
+      contributionCount: Number.isFinite(day.contributionCount) ? day.contributionCount : 0,
+      level: contributionLevel(day.contributionCount),
+    }))
+    .filter((day) => day.date.startsWith(`${year}-`))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+
+  const monthlyTotals = MONTH_LABELS.map((month, index) => ({
+    month,
+    total: days.reduce(
+      (sum, day) => (Number(day.date.slice(5, 7)) === index + 1 ? sum + day.contributionCount : sum),
+      0
+    ),
+  }))
+
+  return {
+    year,
+    totalContributions: days.reduce((sum, day) => sum + day.contributionCount, 0),
+    maxContributionsOnDay: days.reduce((max, day) => Math.max(max, day.contributionCount), 0),
+    longestStreak: calculateLongestStreak(
+      days.map((day) => ({ date: day.date, count: day.contributionCount }))
+    ),
+    activeDays: days.filter((day) => day.contributionCount > 0).length,
+    days,
+    monthlyTotals,
+  }
+}
+
+export const buildAchievements = (user: {
   followers?: number
   public_repos?: number
   public_gists?: number
@@ -319,8 +549,11 @@ const buildAchievements = (user: {
   const followers = user.followers ?? 0
   const repos = user.public_repos ?? 0
   const gists = user.public_gists ?? 0
+  const createdAt = user.created_at ? new Date(user.created_at) : null
   const accountYears =
-    user.created_at ? Math.max(0, new Date().getFullYear() - new Date(user.created_at).getFullYear()) : 0
+    createdAt && !Number.isNaN(createdAt.getTime())
+      ? Math.max(0, (Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24 * 365.25))
+      : 0
 
   return [
     {
@@ -349,7 +582,7 @@ const buildAchievements = (user: {
       label: 'GitHub Veteran',
       description: 'Has maintained an account for 5 years.',
       earned: accountYears >= 5,
-      progress: `${accountYears}/5 years`,
+      progress: `${Math.floor(accountYears)}/5 years`,
     },
     {
       key: 'profile-complete',
@@ -361,12 +594,58 @@ const buildAchievements = (user: {
   ]
 }
 
+export const buildContributionYearsQuery = (years: number[]) => {
+  const aliases = years
+    .map(
+      (year, index) => `
+      year${index}: contributionsCollection(from: "${year}-01-01T00:00:00Z", to: "${year}-12-31T23:59:59Z") {
+        contributionCalendar {
+          totalContributions
+          weeks {
+            contributionDays {
+              date
+              contributionCount
+            }
+          }
+        }
+      }`
+    )
+    .join('')
+
+  return `
+    query ($login: String!) {
+      user(login: $login) {
+        contributionsCollection {
+          contributionYears
+        }${aliases}
+      }
+    }
+  `
+}
+
+type ContributionsResult = {
+  allYears: number[]
+  years: ContributionYearSummary[]
+  warning: string | null
+}
+
 const queryContributions = async (
   username: string,
-  signal: AbortSignal
-): Promise<GitHubContributionsCollection | null> => {
-  if (!process.env.GITHUB_TOKEN) {
-    return null
+  years: number[],
+  signal: AbortSignal,
+  hasToken: boolean
+): Promise<ContributionsResult> => {
+  if (!hasToken) {
+    return {
+      allYears: [],
+      years: [],
+      warning:
+        'Contribution history needs a GitHub token. Set GITHUB_TOKEN to unlock per-year insights.',
+    }
+  }
+
+  if (years.length === 0) {
+    return { allYears: [], years: [], warning: null }
   }
 
   const headers = new Headers({
@@ -376,45 +655,220 @@ const queryContributions = async (
     'Content-Type': 'application/json',
   })
 
-  const query = `
-    query ($login: String!) {
-      user(login: $login) {
-        contributionsCollection {
-          contributionYears
-          contributionCalendar {
-            totalContributions
-            weeks {
-              contributionDays {
-                date
-                contributionCount
-              }
-            }
-          }
-        }
-      }
-    }
-  `
-
-  const response = await fetch('https://api.github.com/graphql', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      query,
-      variables: { login: username },
-    }),
-    signal,
-  })
+  let response: Response
+  try {
+    response = await fetch(GITHUB_GRAPHQL_URL, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        query: buildContributionYearsQuery(years),
+        variables: { login: username },
+      }),
+      signal,
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
+    return { allYears: [], years: [], warning: 'Contribution history could not be reached.' }
+  }
 
   if (!response.ok) {
-    return null
+    const rateLimit = parseRateLimitInfo(response)
+    if (isRateLimitedResponse(response, rateLimit)) {
+      return {
+        allYears: [],
+        years: [],
+        warning: 'The GitHub GraphQL rate limit blocked contribution history. Try again later.',
+      }
+    }
+    return {
+      allYears: [],
+      years: [],
+      warning: `Contribution history is unavailable right now (${response.status}).`,
+    }
   }
 
-  const payload = (await response.json()) as GitHubUserContributionsResponse
-  if (payload.errors && payload.errors.length > 0) {
-    return null
+  let payload: GitHubUserContributionsResponse
+  try {
+    payload = (await response.json()) as GitHubUserContributionsResponse
+  } catch {
+    return { allYears: [], years: [], warning: 'Contribution history returned an unexpected response.' }
   }
 
-  return payload.data?.user?.contributionsCollection || null
+  const user = payload.data?.user
+  if (!user) {
+    const message = payload.errors?.[0]?.message
+    return {
+      allYears: [],
+      years: [],
+      warning: message
+        ? `Contribution history is unavailable: ${message}`
+        : 'Contribution history is unavailable for this account.',
+    }
+  }
+
+  const allYears = (user.contributionsCollection?.contributionYears ?? [])
+    .filter((year): year is number => Number.isInteger(year))
+    .sort((a, b) => b - a)
+
+  const summaries: ContributionYearSummary[] = []
+  years.forEach((year, index) => {
+    const collection = user[`year${index}`] as GitHubContributionsCollection | undefined
+    // A year only counts as "loaded" when GitHub actually answered for it, even
+    // if the calendar itself comes back empty (a dormant account).
+    if (!collection?.contributionCalendar) return
+    const rawDays = (collection.contributionCalendar.weeks ?? []).flatMap(
+      (week) => week.contributionDays || []
+    )
+    summaries.push(buildContributionYear(year, rawDays))
+  })
+
+  return {
+    allYears,
+    years: summaries.sort((a, b) => b.year - a.year),
+    warning: null,
+  }
+}
+
+const toRepoSummary = (raw: Record<string, unknown>): GitHubRepoSummary => {
+  const license = raw.license as { spdx_id?: string | null; name?: string | null } | null
+
+  return {
+    id: Number(raw.id ?? 0),
+    name: String(raw.name ?? ''),
+    full_name: String(raw.full_name ?? ''),
+    html_url: String(raw.html_url ?? ''),
+    description: typeof raw.description === 'string' ? raw.description : null,
+    language: typeof raw.language === 'string' ? raw.language : null,
+    stargazers_count: Number(raw.stargazers_count ?? 0),
+    forks_count: Number(raw.forks_count ?? 0),
+    watchers_count: Number(raw.watchers_count ?? 0),
+    open_issues_count: Number(raw.open_issues_count ?? 0),
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : null,
+    updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : null,
+    pushed_at: typeof raw.pushed_at === 'string' ? raw.pushed_at : null,
+    fork: Boolean(raw.fork),
+    archived: Boolean(raw.archived),
+    is_template: Boolean(raw.is_template),
+    default_branch: typeof raw.default_branch === 'string' ? raw.default_branch : null,
+    homepage: typeof raw.homepage === 'string' && raw.homepage.length > 0 ? raw.homepage : null,
+    topics: Array.isArray(raw.topics)
+      ? raw.topics.filter((topic): topic is string => typeof topic === 'string').slice(0, 12)
+      : [],
+    license:
+      license && (license.spdx_id || license.name)
+        ? {
+            spdx_id: typeof license.spdx_id === 'string' ? license.spdx_id : null,
+            name: typeof license.name === 'string' ? license.name : null,
+          }
+        : null,
+  }
+}
+
+const toEventSummary = (raw: Record<string, unknown>): GitHubEventSummary => {
+  const payload = (raw.payload as Record<string, unknown>) ?? {}
+  const commits = Array.isArray(payload.commits)
+    ? (payload.commits as Record<string, unknown>[])
+        .filter((commit) => typeof commit?.message === 'string')
+        .slice(0, 20)
+        .map((commit) => ({
+          sha: typeof commit.sha === 'string' ? commit.sha : '',
+          message: String(commit.message),
+        }))
+    : []
+
+  const pullRequest = payload.pull_request as Record<string, unknown> | undefined
+  const issue = payload.issue as Record<string, unknown> | undefined
+  const forkee = payload.forkee as Record<string, unknown> | undefined
+  const release = payload.release as Record<string, unknown> | undefined
+
+  return {
+    id: String(raw.id ?? ''),
+    type: String(raw.type ?? ''),
+    repo: {
+      name: typeof (raw.repo as Record<string, unknown>)?.name === 'string'
+        ? String((raw.repo as Record<string, unknown>).name)
+        : '',
+    },
+    created_at: String(raw.created_at ?? ''),
+    payload: {
+      action: typeof payload.action === 'string' ? payload.action : undefined,
+      ref: typeof payload.ref === 'string' ? payload.ref : undefined,
+      ref_type: typeof payload.ref_type === 'string' ? payload.ref_type : undefined,
+      size: typeof payload.size === 'number' ? payload.size : undefined,
+      distinct_size: typeof payload.distinct_size === 'number' ? payload.distinct_size : undefined,
+      commits,
+      pull_request: pullRequest
+        ? {
+            number: Number(pullRequest.number ?? 0),
+            title: String(pullRequest.title ?? ''),
+            merged: Boolean(pullRequest.merged),
+            html_url: String(pullRequest.html_url ?? ''),
+          }
+        : undefined,
+      issue: issue
+        ? {
+            number: Number(issue.number ?? 0),
+            title: String(issue.title ?? ''),
+            html_url: String(issue.html_url ?? ''),
+          }
+        : undefined,
+      forkee: forkee
+        ? { full_name: String(forkee.full_name ?? ''), html_url: String(forkee.html_url ?? '') }
+        : undefined,
+      release: release
+        ? {
+            tag_name: String(release.tag_name ?? ''),
+            name: typeof release.name === 'string' ? release.name : null,
+            html_url: String(release.html_url ?? ''),
+          }
+        : undefined,
+    },
+  }
+}
+
+const EXTERNAL_URL_PATTERN = /^([a-z][a-z0-9+.-]*:|\/\/)/i
+
+/**
+ * GitHub's rendered README HTML (from the `application/vnd.github.html` media
+ * type) keeps *relative* asset URLs such as `src="header.gif"`. Those resolve
+ * against github.com on GitHub's own pages, but break when the markup is
+ * embedded somewhere else, so rewrite them to absolute URLs.
+ */
+export const rewriteReadmeUrls = (html: string, login: string) => {
+  const repoPath = `${login}/${login}`
+  const rawBase = `https://github.com/${repoPath}/raw/HEAD/`
+  const blobBase = `https://github.com/${repoPath}/blob/HEAD/`
+
+  const resolve = (value: string, kind: 'image' | 'link') => {
+    const trimmed = value.trim()
+    if (!trimmed || trimmed.startsWith('#') || EXTERNAL_URL_PATTERN.test(trimmed)) return value
+    if (trimmed.startsWith('/')) return `https://github.com${trimmed}`
+    const base = kind === 'image' ? rawBase : blobBase
+    return `${base}${trimmed.replace(/^\.\//, '')}`
+  }
+
+  return html.replace(
+    /(\s)(src|href|poster|data-src|srcset)="([^"]*)"/gi,
+    (_match, whitespace: string, attribute: string, value: string) => {
+      const name = attribute.toLowerCase()
+
+      if (name === 'srcset') {
+        const rewritten = value
+          .split(',')
+          .map((entry) => {
+            const parts = entry.trim().split(/\s+/)
+            if (parts.length === 0 || !parts[0]) return entry
+            return [resolve(parts[0], 'image'), ...parts.slice(1)].join(' ')
+          })
+          .join(', ')
+        return `${whitespace}${attribute}="${rewritten}"`
+      }
+
+      const kind: 'image' | 'link' =
+        name === 'src' || name === 'poster' || name === 'data-src' ? 'image' : 'link'
+      return `${whitespace}${attribute}="${resolve(value, kind)}"`
+    }
+  )
 }
 
 export default async function handler(request: Request) {
@@ -435,6 +889,12 @@ export default async function handler(request: Request) {
     1,
     MAX_EVENTS_LIMIT
   )
+  const yearsLimit = parseIntParam(
+    requestUrl.searchParams.get('yearsLimit'),
+    DEFAULT_CONTRIBUTION_YEARS,
+    1,
+    MAX_CONTRIBUTION_YEARS
+  )
 
   if (!username) {
     return jsonResponse(
@@ -443,7 +903,20 @@ export default async function handler(request: Request) {
         errorCode: 'bad_request',
       },
       400,
-      'no-store'
+      NO_STORE_HEADER
+    )
+  }
+
+  // Reject anything that is not a plausible GitHub login early: it keeps the
+  // upstream calls predictable and avoids passing junk straight through.
+  if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/.test(username)) {
+    return jsonResponse(
+      {
+        message: `"${username}" is not a valid GitHub username.`,
+        errorCode: 'invalid_username',
+      },
+      400,
+      NO_STORE_HEADER
     )
   }
 
@@ -463,7 +936,7 @@ export default async function handler(request: Request) {
           rateLimit: userRateLimit,
         },
         429,
-        'no-store'
+        NO_STORE_HEADER
       )
     }
 
@@ -475,12 +948,16 @@ export default async function handler(request: Request) {
 
       return jsonResponse(
         {
-          message: await parseGitHubErrorMessage(userResponse, fallback),
+          // GitHub answers 404 with a bare "Not Found", which tells the user
+          // nothing useful, so keep the descriptive fallback in that case.
+          message: isUserMissing
+            ? fallback
+            : await parseGitHubErrorMessage(userResponse, fallback),
           errorCode: isUserMissing ? 'user_not_found' : 'github_error',
           rateLimit: userRateLimit,
         },
         isUserMissing ? 404 : 502,
-        'no-store'
+        NO_STORE_HEADER
       )
     }
 
@@ -493,35 +970,53 @@ export default async function handler(request: Request) {
       timezone: inferredTimezone,
     }
 
-    const [reposResult, eventsResult, profileReadmeResponse, profileReadmeMetaResponse, contributionsCollection] =
-      await Promise.all([
-        fetchPaginated<Record<string, unknown>>(
-          (page, perPage) =>
-            `/users/${encodedUsername}/repos?sort=updated&per_page=${perPage}&page=${page}`,
-          'repositories',
-          timeoutController.signal,
-          reposLimit,
-          GITHUB_MAX_PER_PAGE
-        ),
-        fetchPaginated<Record<string, unknown>>(
-          (page, perPage) =>
-            `/users/${encodedUsername}/events/public?per_page=${perPage}&page=${page}`,
-          'activity events',
-          timeoutController.signal,
-          eventsLimit,
-          EVENTS_PER_PAGE
-        ),
-        githubRequest(
-          `/repos/${encodedUsername}/${encodedUsername}/readme`,
-          timeoutController.signal,
-          'application/vnd.github.html'
-        ),
-        githubRequest(
-          `/repos/${encodedUsername}/${encodedUsername}/readme`,
-          timeoutController.signal
-        ),
-        queryContributions(username, timeoutController.signal),
-      ])
+    // Candidate years for the contribution calendar are derived from the
+    // account creation date so a single GraphQL round trip can cover the whole
+    // history window the client asked for.
+    const currentYear = new Date().getUTCFullYear()
+    const createdAt = typeof userRaw.created_at === 'string' ? new Date(userRaw.created_at) : null
+    const createdYear =
+      createdAt && !Number.isNaN(createdAt.getTime()) ? createdAt.getUTCFullYear() : currentYear
+    const firstCandidateYear = Math.max(createdYear, currentYear - yearsLimit + 1)
+    const candidateYears: number[] = []
+    for (let year = currentYear; year >= firstCandidateYear; year -= 1) {
+      candidateYears.push(year)
+    }
+
+    const [
+      reposResult,
+      eventsResult,
+      profileReadmeResponse,
+      contributionsResult,
+    ] = await Promise.all([
+      fetchPaginated<Record<string, unknown>>(
+        (page, perPage) =>
+          `/users/${encodedUsername}/repos?sort=updated&per_page=${perPage}&page=${page}`,
+        'repositories',
+        timeoutController.signal,
+        reposLimit,
+        GITHUB_MAX_PER_PAGE
+      ),
+      fetchPaginated<Record<string, unknown>>(
+        (page, perPage) =>
+          `/users/${encodedUsername}/events/public?per_page=${perPage}&page=${page}`,
+        'activity events',
+        timeoutController.signal,
+        eventsLimit,
+        EVENTS_PER_PAGE
+      ),
+      githubRequest(
+        `/repos/${encodedUsername}/${encodedUsername}/readme`,
+        timeoutController.signal,
+        'application/vnd.github.html'
+      ),
+      queryContributions(
+        username,
+        candidateYears,
+        timeoutController.signal,
+        Boolean(process.env.GITHUB_TOKEN)
+      ),
+    ])
 
     const warnings: string[] = []
 
@@ -542,106 +1037,26 @@ export default async function handler(request: Request) {
 
     if (profileReadmeResponse.ok) {
       const renderedHtml = await profileReadmeResponse.text()
-      let sourceUrl: string | null = `https://github.com/${username}/${username}#readme`
-      if (profileReadmeMetaResponse.ok) {
-        try {
-          const meta = (await profileReadmeMetaResponse.json()) as GitHubReadmeMetadata
-          if (typeof meta.html_url === 'string' && meta.html_url.length > 0) {
-            sourceUrl = meta.html_url
-          }
-        } catch {
-          // Ignore metadata parse errors; keep fallback URL.
-        }
-      }
-
       profileReadme = {
         exists: renderedHtml.trim().length > 0,
-        contentHtml: renderedHtml,
-        sourceUrl,
+        contentHtml: renderedHtml.trim().length > 0 ? rewriteReadmeUrls(renderedHtml, username) : null,
+        sourceUrl: `https://github.com/${username}/${username}#readme`,
         updatedAt: null,
       }
     } else if (profileReadmeResponse.status !== 404) {
       warnings.push(await buildEndpointWarning('profile README', profileReadmeResponse, readmeRateLimit))
     }
 
-    const contributionsByYear = new Map<
-      number,
-      {
-        totalContributions: number
-        maxContributionsOnDay: number
-        longestStreak: number
-        days: { date: string; contributionCount: number; level: number }[]
-      }
-    >()
+    if (contributionsResult.warning) warnings.push(contributionsResult.warning)
 
-    if (contributionsCollection) {
-      for (const yearEntry of contributionsCollection.contributionYears) {
-        contributionsByYear.set(yearEntry, {
-          totalContributions: 0,
-          maxContributionsOnDay: 0,
-          longestStreak: 0,
-          days: [],
-        })
-      }
+    const availableContributionYears = Array.from(
+      new Set([...contributionsResult.allYears, ...candidateYears, currentYear])
+    ).sort((a, b) => b - a)
 
-      const allDays = contributionsCollection.contributionCalendar.weeks.flatMap(
-        (week) => week.contributionDays || []
-      )
-
-      for (const day of allDays) {
-        const year = new Date(day.date).getUTCFullYear()
-        const existing = contributionsByYear.get(year)
-        if (!existing) {
-          contributionsByYear.set(year, {
-            totalContributions: 0,
-            maxContributionsOnDay: 0,
-            longestStreak: 0,
-            days: [],
-          })
-        }
-        const target = contributionsByYear.get(year)
-        if (!target) continue
-        target.days.push({
-          date: day.date,
-          contributionCount: day.contributionCount,
-          level: day.contributionCount <= 0 ? 0 : day.contributionCount <= 2 ? 1 : day.contributionCount <= 5 ? 2 : day.contributionCount <= 9 ? 3 : 4,
-        })
-      }
-
-      for (const [year, value] of contributionsByYear) {
-        value.days.sort((a, b) => (a.date < b.date ? -1 : 1))
-        value.totalContributions = value.days.reduce((sum, day) => sum + day.contributionCount, 0)
-        value.maxContributionsOnDay = value.days.reduce(
-          (max, day) => Math.max(max, day.contributionCount),
-          0
-        )
-        value.longestStreak = calculateLongestStreak(
-          value.days.map((day) => ({ date: day.date, count: day.contributionCount }))
-        )
-        contributionsByYear.set(year, value)
-      }
-    }
-
-    const contributionYears = Array.from(contributionsByYear.entries())
-      .map(([year, data]) => ({
-        year,
-        totalContributions: data.totalContributions,
-        longestStreak: data.longestStreak,
-        maxContributionsOnDay: data.maxContributionsOnDay,
-        days: data.days,
-        monthlyTotals: Array.from(
-          data.days.reduce((map, day) => {
-            const month = new Date(day.date).toLocaleDateString('en-US', { month: 'short' })
-            map.set(month, (map.get(month) || 0) + day.contributionCount)
-            return map
-          }, new Map<string, number>())
-        ).map(([month, total]) => ({ month, total })),
-      }))
-      .sort((a, b) => b.year - a.year)
-
-    const filteredContributionYears = Number.isInteger(selectedYear)
-      ? contributionYears.filter((item) => item.year === selectedYear)
-      : contributionYears
+    const loadedContributionYears = new Set(contributionsResult.years.map((entry) => entry.year))
+    const contributionYears = Number.isInteger(selectedYear)
+      ? contributionsResult.years.filter((entry) => entry.year === selectedYear)
+      : contributionsResult.years
 
     const aggregatedRateLimit = mergeRateLimits([
       userRateLimit,
@@ -651,7 +1066,11 @@ export default async function handler(request: Request) {
     ])
     const { remaining, resetAt } = aggregatedRateLimit
 
-    if (typeof remaining === 'number' && remaining > 0 && remaining <= 3) {
+    if (
+      typeof remaining === 'number' &&
+      remaining > 0 &&
+      remaining <= LOW_RATE_LIMIT_THRESHOLD
+    ) {
       warnings.push(`GitHub API rate limit is low (${remaining} requests remaining).`)
     }
 
@@ -673,26 +1092,33 @@ export default async function handler(request: Request) {
 
     return jsonResponse({
       user,
-      repos: reposResult.items,
-      events: eventsResult.items,
+      repos: reposResult.items.map(toRepoSummary),
+      events: eventsResult.items.map(toEventSummary),
       profileReadme,
       locationInsight,
       achievements,
-      contributions: filteredContributionYears,
-      availableContributionYears: contributionYears.map((item) => item.year),
+      contributions: contributionYears,
+      loadedContributionYears: Array.from(loadedContributionYears),
+      availableContributionYears,
       warnings,
       pagination: {
         repos: {
           limit: reposLimit,
           fetched: reposResult.totalFetched,
-          hasMore: reposResult.truncated,
+          hasMore: reposResult.hasMore,
           maxLimit: MAX_REPOS_LIMIT,
         },
         events: {
           limit: eventsLimit,
           fetched: eventsResult.totalFetched,
-          hasMore: eventsResult.truncated,
+          hasMore: eventsResult.hasMore,
           maxLimit: MAX_EVENTS_LIMIT,
+        },
+        years: {
+          limit: yearsLimit,
+          fetched: contributionYears.length,
+          hasMore: availableContributionYears.some((year) => !loadedContributionYears.has(year)),
+          maxLimit: MAX_CONTRIBUTION_YEARS,
         },
       },
       rateLimit: {
@@ -709,9 +1135,12 @@ export default async function handler(request: Request) {
           errorCode: 'upstream_timeout',
         },
         504,
-        'no-store'
+        NO_STORE_HEADER
       )
     }
+
+    // Surfaced in the Vercel/dev logs; the client only sees a generic message.
+    console.error('[api/github] request failed', error)
 
     return jsonResponse(
       {
@@ -719,7 +1148,7 @@ export default async function handler(request: Request) {
         errorCode: 'proxy_error',
       },
       500,
-      'no-store'
+      NO_STORE_HEADER
     )
   } finally {
     clearTimeout(timeoutId)

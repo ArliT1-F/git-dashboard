@@ -188,13 +188,57 @@
   animation: floatY 5s ease-in-out infinite;
 }
 
-.gh-float-delay {
+.gh-float-delay,
+.gh-float-delayed {
   animation: floatY 6s ease-in-out infinite;
   animation-delay: -2s;
 }
 
 .gh-shimmer {
   animation: shimmer 2.4s ease-in-out infinite;
+}
+
+/* Landing hero decorations.
+   These classes are referenced by the hero section in src/pages/Index.tsx —
+   without them the splash art, grid overlay and pulsing glows never render. */
+.gh-splash-art {
+  background:
+    radial-gradient(60% 55% at 12% 8%, rgba(47, 129, 247, 0.18), transparent 60%),
+    radial-gradient(50% 45% at 88% 0%, rgba(63, 185, 80, 0.12), transparent 62%),
+    radial-gradient(45% 45% at 60% 100%, rgba(163, 113, 247, 0.12), transparent 65%);
+  filter: blur(6px);
+}
+
+.gh-grid-overlay {
+  background-image:
+    linear-gradient(rgba(48, 54, 61, 0.22) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(48, 54, 61, 0.22) 1px, transparent 1px);
+  background-size: 48px 48px;
+  -webkit-mask-image: radial-gradient(circle at 50% 20%, black 25%, transparent 78%);
+  mask-image: radial-gradient(circle at 50% 20%, black 25%, transparent 78%);
+}
+
+.gh-pulse-slow {
+  animation: backgroundPulse 14s ease-in-out infinite;
+}
+
+.gh-pulse-slow-delayed {
+  animation: backgroundPulse 18s ease-in-out infinite;
+  animation-delay: -6s;
+}
+
+/* Respect users who ask for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .gh-float,
+  .gh-float-delay,
+  .gh-float-delayed,
+  .gh-pulse-slow,
+  .gh-pulse-slow-delayed,
+  .gh-shimmer,
+  .landing-splash::before,
+  .animate-slide-in {
+    animation: none;
+  }
 }
 
 /* GitHub-style focus ring */

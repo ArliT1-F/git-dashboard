@@ -4,12 +4,19 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   GitHubAchievement,
-  GitHubContributionDay,
   GitHubContributionYearSummary,
   GitHubLocationInsight,
-  GitHubContributionMonthTotal,
   GitHubUser,
 } from '@/types/github'
+import {
+  WEEKDAY_LABELS,
+  buildContributionCalendar,
+  intensityClass,
+  summarizeContributions,
+} from '@/lib/contributions'
+import { formatNumber } from '@/lib/format'
+import { sanitizeReadmeHtml } from '@/lib/readme'
+import { Award, CalendarDays, Loader2, MapPin, Sparkles } from 'lucide-react'
 
 interface GitHubInsightsProps {
   user: GitHubUser
@@ -18,32 +25,11 @@ interface GitHubInsightsProps {
   achievements: GitHubAchievement[]
   locationInsight: GitHubLocationInsight
   contributionSummary: GitHubContributionYearSummary | null
-  contributionDays: GitHubContributionDay[]
-  contributionMonthlyTotals: GitHubContributionMonthTotal[]
   selectedYear: number
   availableYears: number[]
+  loadedYears: number[]
   onSelectYear: (year: number) => void
-}
-
-const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-
-const formatDate = (dateString: string) =>
-  new Date(dateString).toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  })
-
-const getYearRange = (createdAt: string) => {
-  const startYear = new Date(createdAt).getFullYear()
-  const currentYear = new Date().getFullYear()
-  const years: number[] = []
-
-  for (let year = currentYear; year >= startYear; year -= 1) {
-    years.push(year)
-  }
-
-  return years
+  yearsLoading: boolean
 }
 
 const toTimezoneLabel = (timezone: string | null) => {
@@ -54,13 +40,13 @@ const toTimezoneLabel = (timezone: string | null) => {
   return `${parts[0]} / ${parts.slice(1).join(' / ').replace(/_/g, ' ')}`
 }
 
-const getContributionIntensityClass = (count: number) => {
-  if (count <= 0) return 'bg-muted'
-  if (count <= 2) return 'bg-emerald-900/60'
-  if (count <= 5) return 'bg-emerald-700/70'
-  if (count <= 9) return 'bg-emerald-600/80'
-  return 'bg-emerald-400'
-}
+const StatTile = ({ label, value, hint }: { label: string; value: string; hint?: string }) => (
+  <div className="rounded-md border p-3">
+    <p className="text-sm text-muted-foreground">{label}</p>
+    <p className="text-lg font-semibold">{value}</p>
+    {hint && <p className="text-[11px] text-muted-foreground">{hint}</p>}
+  </div>
+)
 
 export default function GitHubInsights({
   user,
@@ -69,39 +55,29 @@ export default function GitHubInsights({
   achievements,
   locationInsight,
   contributionSummary,
-  contributionDays,
-  contributionMonthlyTotals,
   selectedYear,
   availableYears,
+  loadedYears,
   onSelectYear,
+  yearsLoading,
 }: GitHubInsightsProps) {
-  const yearOptions = useMemo(() => {
-    if (availableYears.length > 0) {
-      return availableYears
-    }
-    return getYearRange(user.created_at)
-  }, [availableYears, user.created_at])
+  const contributionDays = useMemo(() => contributionSummary?.days ?? [], [contributionSummary])
+  const loadedYearSet = useMemo(() => new Set(loadedYears), [loadedYears])
 
-  const contributionWeeks = useMemo(() => {
-    const bucket = new Map<string, GitHubContributionDay[]>()
+  const calendar = useMemo(
+    () => buildContributionCalendar(contributionDays),
+    [contributionDays]
+  )
 
-    for (const day of contributionDays) {
-      const date = new Date(day.date)
-      const weekStart = new Date(date)
-      weekStart.setDate(date.getDate() - date.getDay())
-      const weekKey = weekStart.toISOString().slice(0, 10)
-      const existing = bucket.get(weekKey) || []
-      existing.push(day)
-      bucket.set(weekKey, existing)
-    }
+  const insights = useMemo(() => summarizeContributions(contributionDays), [contributionDays])
 
-    return Array.from(bucket.entries())
-      .sort(([a], [b]) => (a < b ? -1 : 1))
-      .map(([, days]) => {
-        const byWeekday = new Map(days.map((day) => [new Date(day.date).getDay(), day]))
-        return WEEKDAY_LABELS.map((_, weekdayIndex) => byWeekday.get(weekdayIndex) || null)
-      })
-  }, [contributionDays])
+  const sanitizedReadme = useMemo(
+    () => sanitizeReadmeHtml(profileReadmeHtml),
+    [profileReadmeHtml]
+  )
+
+  const monthlyTotals = contributionSummary?.monthlyTotals ?? []
+  const maxMonthlyTotal = monthlyTotals.reduce((max, entry) => Math.max(max, entry.total), 0)
 
   const timezoneNow = useMemo(() => {
     if (!locationInsight.timezone) return null
@@ -117,30 +93,44 @@ export default function GitHubInsights({
     }
   }, [locationInsight.timezone])
 
+  const currentYear = new Date().getUTCFullYear()
+  const isViewingCurrentYear = selectedYear === currentYear
+  const earnedAchievements = achievements.filter((achievement) => achievement.earned).length
+
   return (
     <div className="space-y-6">
       <Card className="w-full">
         <CardHeader>
-          <CardTitle>Profile Insights</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Award className="h-5 w-5 text-amber-300" />
+            Profile Insights
+          </CardTitle>
           <CardDescription>
-            Additional signals from account activity, milestones, and profile metadata.
+            {earnedAchievements}/{achievements.length} milestones earned, plus timezone and profile metadata.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
           <div>
-            <h3 className="text-sm font-semibold mb-2">Achievements</h3>
+            <h3 className="text-sm font-semibold mb-2">Milestones</h3>
             {achievements.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No notable achievements inferred yet.</p>
+              <p className="text-sm text-muted-foreground">No notable milestones inferred yet.</p>
             ) : (
-              <div className="flex flex-wrap gap-2">
+              <div className="grid gap-2 sm:grid-cols-2">
                 {achievements.map((achievement) => (
-                  <div key={achievement.key} className="group">
-                    <Badge variant={achievement.earned ? 'secondary' : 'outline'} className="text-xs px-3 py-1">
-                      {achievement.label}
-                    </Badge>
-                    <p className="mt-1 text-[11px] text-muted-foreground max-w-[210px]">
-                      {achievement.progress}
-                    </p>
+                  <div
+                    key={achievement.key}
+                    className={`rounded-md border p-3 transition-colors ${
+                      achievement.earned ? 'border-emerald-500/40 bg-emerald-500/5' : 'opacity-70'
+                    }`}
+                    title={achievement.description}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium">{achievement.label}</p>
+                      <Badge variant={achievement.earned ? 'secondary' : 'outline'} className="text-[11px]">
+                        {achievement.earned ? 'Earned' : 'In progress'}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">{achievement.progress}</p>
                   </div>
                 ))}
               </div>
@@ -148,11 +138,14 @@ export default function GitHubInsights({
           </div>
 
           <div>
-            <h3 className="text-sm font-semibold mb-2">Location & Timezone</h3>
+            <h3 className="text-sm font-semibold mb-2 flex items-center gap-2">
+              <MapPin className="h-4 w-4 text-blue-300" />
+              Location &amp; Timezone
+            </h3>
             <div className="grid sm:grid-cols-3 gap-2 text-sm">
               <div className="border rounded-md p-3">
                 <p className="text-muted-foreground">Location</p>
-                <p className="font-medium">{locationInsight.location || 'Unknown'}</p>
+                <p className="font-medium break-words">{locationInsight.location || 'Unknown'}</p>
               </div>
               <div className="border rounded-md p-3">
                 <p className="text-muted-foreground">Timezone</p>
@@ -161,6 +154,9 @@ export default function GitHubInsights({
               <div className="border rounded-md p-3">
                 <p className="text-muted-foreground">Local time</p>
                 <p className="font-medium">{timezoneNow || 'Unavailable'}</p>
+                {locationInsight.inferredFromLocation && (
+                  <p className="text-[11px] text-muted-foreground">Inferred from profile location</p>
+                )}
               </div>
             </div>
           </div>
@@ -169,105 +165,174 @@ export default function GitHubInsights({
 
       <Card className="w-full">
         <CardHeader>
-          <CardTitle>Contribution History</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <CalendarDays className="h-5 w-5 text-emerald-300" />
+            Contribution History
+          </CardTitle>
           <CardDescription>
-            Select a year since account creation to inspect annual contributions.
+            Daily contribution calendar, streaks and monthly totals per year. Older years load on demand.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex flex-wrap gap-2">
-            {yearOptions.map((year) => (
-              <Button
-                key={year}
-                type="button"
-                variant={year === selectedYear ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => onSelectYear(year)}
-              >
-                {year}
-              </Button>
-            ))}
+          <div className="flex flex-wrap items-center gap-2">
+            {availableYears.map((year) => {
+              const isLoaded = loadedYearSet.has(year)
+              return (
+                <Button
+                  key={year}
+                  type="button"
+                  variant={year === selectedYear ? 'default' : 'outline'}
+                  size="sm"
+                  disabled={yearsLoading && !isLoaded}
+                  onClick={() => onSelectYear(year)}
+                  title={isLoaded ? undefined : 'Load this year from GitHub'}
+                  className={isLoaded ? undefined : 'border-dashed text-muted-foreground'}
+                >
+                  {year}
+                  {!isLoaded && <span className="ml-1 text-[10px]">•</span>}
+                </Button>
+              )
+            })}
+            {yearsLoading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
           </div>
 
-          {contributionSummary && (
-            <div className="grid sm:grid-cols-3 gap-3">
-              <div className="border rounded-md p-3">
-                <p className="text-muted-foreground text-sm">Total contributions</p>
-                <p className="font-semibold text-lg">{contributionSummary.totalContributions}</p>
+          {contributionSummary && contributionDays.length > 0 ? (
+            <>
+              <div className="grid sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                <StatTile label="Total" value={formatNumber(contributionSummary.totalContributions)} />
+                <StatTile label="Active days" value={formatNumber(insights.activeDays)} />
+                <StatTile label="Longest streak" value={`${insights.longestStreak}d`} />
+                <StatTile
+                  label="Current streak"
+                  value={isViewingCurrentYear ? `${insights.currentStreak}d` : '—'}
+                  hint={isViewingCurrentYear ? undefined : `Selected year: ${selectedYear}`}
+                />
+                <StatTile label="Busiest day" value={formatNumber(contributionSummary.maxContributionsOnDay)} />
+                <StatTile
+                  label="Busiest weekday"
+                  value={insights.busiestWeekday?.label ?? '—'}
+                  hint={
+                    insights.busiestWeekday
+                      ? `${formatNumber(insights.busiestWeekday.total)} contributions`
+                      : undefined
+                  }
+                />
               </div>
-              <div className="border rounded-md p-3">
-                <p className="text-muted-foreground text-sm">Max in one day</p>
-                <p className="font-semibold text-lg">{contributionSummary.maxContributionsOnDay}</p>
-              </div>
-              <div className="border rounded-md p-3">
-                <p className="text-muted-foreground text-sm">Days with contributions</p>
-                <p className="font-semibold text-lg">
-                  {contributionDays.filter((day) => day.contributionCount > 0).length}
-                </p>
-              </div>
-            </div>
-          )}
 
-          {contributionMonthlyTotals.length > 0 && (
-            <div>
-              <h3 className="text-sm font-semibold mb-2">Monthly totals</h3>
-              <div className="grid sm:grid-cols-4 lg:grid-cols-6 gap-2">
-                {contributionMonthlyTotals.map((month) => (
-                  <div key={month.month} className="border rounded-md p-2 text-sm">
-                    <p className="text-muted-foreground">{month.month}</p>
-                    <p className="font-medium">{month.total}</p>
-                  </div>
-                ))}
+              <div>
+                <h3 className="text-sm font-semibold mb-2">Monthly totals</h3>
+                <div className="flex items-end gap-1.5 h-28" role="img" aria-label={`Monthly contributions in ${selectedYear}`}>
+                  {monthlyTotals.map((month) => {
+                    const height = maxMonthlyTotal > 0 ? (month.total / maxMonthlyTotal) * 100 : 0
+                    return (
+                      <div key={month.month} className="flex-1 flex flex-col items-center gap-1">
+                        <div className="relative w-full flex-1 flex items-end">
+                          <div
+                            className="w-full rounded-t bg-emerald-500/70 hover:bg-emerald-400 transition-all"
+                            style={{ height: `${Math.max(height, month.total > 0 ? 4 : 0)}%` }}
+                            title={`${month.month}: ${formatNumber(month.total)} contributions`}
+                          />
+                        </div>
+                        <span className="text-[10px] text-muted-foreground">{month.month}</span>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
-            </div>
-          )}
 
-          {contributionWeeks.length > 0 ? (
-            <div className="overflow-x-auto">
-              <div className="inline-flex gap-1 min-w-max border rounded-md p-3">
-                {contributionWeeks.map((week, weekIndex) => (
-                  <div key={weekIndex} className="grid grid-rows-7 gap-1">
-                    {week.map((day, dayIndex) => (
-                      <div
-                        key={`${weekIndex}-${dayIndex}`}
-                        className={`h-3 w-3 rounded-[2px] ${getContributionIntensityClass(day?.contributionCount || 0)}`}
-                        title={
-                          day
-                            ? `${day.contributionCount} contributions on ${formatDate(day.date)}`
-                            : `${WEEKDAY_LABELS[dayIndex]} (no data)`
-                        }
-                      />
-                    ))}
+              <div>
+                <h3 className="text-sm font-semibold mb-2">Daily calendar</h3>
+                <div className="overflow-x-auto pb-2">
+                  <div className="inline-flex flex-col gap-1 min-w-max rounded-md border p-3">
+                    <div className="flex gap-1 pl-8">
+                      {calendar.weeks.map((week, index) => {
+                        const label = calendar.monthLabels.find((entry) => entry.weekIndex === index)
+                        return (
+                          <div key={`label-${week.key}`} className="w-3 text-[10px] text-muted-foreground">
+                            {label ? label.label : ''}
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <div className="flex gap-1">
+                      <div className="grid grid-rows-7 gap-1 pr-1">
+                        {WEEKDAY_LABELS.map((label, index) => (
+                          <span
+                            key={label}
+                            className="h-3 text-[9px] leading-3 text-muted-foreground"
+                            aria-hidden={index % 2 === 1}
+                          >
+                            {index % 2 === 1 ? label : ''}
+                          </span>
+                        ))}
+                      </div>
+                      {calendar.weeks.map((week) => (
+                        <div key={week.key} className="grid grid-rows-7 gap-1">
+                          {week.days.map((day, dayIndex) => (
+                            <div
+                              key={`${week.key}-${dayIndex}`}
+                              className={`h-3 w-3 rounded-[2px] ${
+                                day && !day.isFuture
+                                  ? intensityClass(day.level)
+                                  : 'border border-border/60 bg-transparent'
+                              }`}
+                              title={
+                                day
+                                  ? day.isFuture
+                                    ? `${day.date} (upcoming)`
+                                    : day.label
+                                  : undefined
+                              }
+                            />
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center justify-end gap-1 pt-1 text-[10px] text-muted-foreground">
+                      <span>Less</span>
+                      {[0, 1, 2, 3, 4].map((level) => (
+                        <span key={level} className={`h-3 w-3 rounded-[2px] ${intensityClass(level)}`} />
+                      ))}
+                      <span>More</span>
+                    </div>
                   </div>
-                ))}
+                </div>
               </div>
-            </div>
+            </>
           ) : (
-            <p className="text-sm text-muted-foreground">No contribution data available for this year.</p>
+            <p className="text-sm text-muted-foreground">
+              {yearsLoading
+                ? 'Loading contributions for this year…'
+                : `No contribution data available for ${selectedYear}.`}
+            </p>
           )}
         </CardContent>
       </Card>
 
       <Card className="w-full">
         <CardHeader>
-          <CardTitle>Profile README</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-blue-300" />
+            Profile README
+          </CardTitle>
           <CardDescription>
             Rendered from <code>{user.login}/{user.login}</code> repository README when available.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {profileReadmeHtml ? (
+          {sanitizedReadme ? (
             <div className="space-y-3">
               <div
-                className="prose prose-invert max-w-none text-sm"
-                dangerouslySetInnerHTML={{ __html: profileReadmeHtml }}
+                className="prose prose-invert max-w-none text-sm [&_img]:inline-block [&_img]:max-w-full [&_table]:block [&_table]:overflow-x-auto"
+                // Sanitised above: scripts, event handlers and javascript: URLs are stripped.
+                dangerouslySetInnerHTML={{ __html: sanitizedReadme }}
               />
               {profileReadmeSourceUrl && (
                 <a
                   href={profileReadmeSourceUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-blue-600 hover:underline text-sm"
+                  className="text-blue-400 hover:underline text-sm"
                 >
                   View source README on GitHub
                 </a>
